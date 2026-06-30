@@ -1,0 +1,71 @@
+Voici la compilation de toutes nos recommandations, structurée sous forme de feuille de route opérationnelle. Ce document est prêt à être copié-collé et soumis à l'agent IA de votre IDE pour la partie technique, tout en vous laissant une feuille de route claire pour vos actions manuelles.
+
+---
+
+## Part A : Spécifications Techniques (Pour l'Agent IA de l'IDE)
+
+L'objectif est de transformer le prototype de script CLI "one-shot" actuel en un démon de production robuste, sécurisé et prêt pour un déploiement Docker sur Render.
+
+### 1. Création du Moteur d'Automatisation (`runner.py`)
+
+* **Logique :** Encapsuler l'appel à la fonction `check_depeg_and_execute_strategy` de `defi_vault_trader.py` dans une boucle infinie (`while True`).
+* **Cadence :** Exécuter la vérification à un intervalle régulier (ex: toutes les 60 secondes).
+* **Circuit Breaker :** En cas de levée d'exception continue (panne RPC totale, erreur EVM inconnue), le script doit intercepter l'erreur, appliquer une pause de sécurité étendue (ex: 5 à 10 minutes) pour éviter de consommer du processeur ou de boucler anormalement, puis retenter.
+
+### 2. Migration des Logs et Système d'Alerte (Discord / Telegram)
+
+* **Production Logging :** Remplacer tous les `print()` par le module natif `logging` de Python. Configurer un *StreamHandler* pour la console (lisible dans les logs Render) et un *FileHandler* tournant (`RotatingFileHandler`) pour archiver localement si nécessaire.
+* **Notifications Webhook :** Créer un module `alerts.py` utilisant `requests`. Chaque décision majeure (`WITHDRAWN`, `HOLD` en cas de depeg modéré) ou chaque erreur critique (bascule RPC, échec d'estimation de gaz) doit envoyer un payload JSON enrichi (embed) vers un webhook Discord ou Telegram.
+
+### 3. Serveur HTTP de Maintien de Veille & Health Check
+
+* **Serveur Minimal :** Intégrer un serveur HTTP léger (FastAPI ou Flask) s'exécutant dans un thread asynchrone ou parallèle à la boucle de trading.
+* **Endpoint `/health` :** Ce serveur doit exposer un point d'accès qui renvoie un statut `200 OK` et quelques métriques de base (ex : état de connexion RPC, dernier bloc analysé). Cela permettra à UptimeRobot de ping l'instance Render et empêchera la mise en veille du conteneur gratuit.
+
+### 4. Durcissement OpSec des Clés Privées
+
+* **Sécurisation Immédiate :** Modifier la récupération de `HOT_WALLET_PRIVATE_KEY` pour lever une erreur explicite et bloquer le démarrage du bot si la clé est absente en production (mode non-simulation).
+* **Évolutivité KMS (Optionnel) :** Préparer une structure abstraite de signature afin de pouvoir remplacer facilement l'objet `w3.eth.account.sign_transaction` par un appel d'enclave via `boto3` (AWS KMS) si la clé doit être retirée de la mémoire de l'instance.
+
+### 5. Conteneurisation & CI/CD
+
+* **Dockerfile :** Rédiger un fichier multi-stage optimisé pour Python 3.10+, installant les dépendances de `requirements.txt` sans cache.
+* **Workflow GitHub Actions :** Écrire le fichier `.github/workflows/deploy.yml` pour builder l'image à chaque push sur `main`, la pousser sur un registre (GHCR.io ou Docker Hub), puis déclencher le webhook de déploiement automatique de Render.
+
+---
+
+## Part B : Actions Manuelles et Configuration (Pour Vous)
+
+Ces étapes concernent la mise en place de l'infrastructure financière et l'initialisation des droits on-chain sur le réseau **Base**.
+
+### 1. Configuration des Portefeuilles sur le Réseau Base
+
+| Type de Portefeuille | Technologie préconisée | Rôle opérationnel |
+| --- | --- | --- |
+| **Hot Wallet (Bot)** | Clé privée logicielle classique (MetaMask/Rabby). | Signe les transactions d'urgence, interagit avec Beefy et paie le gaz. |
+| **Cold Wallet (Stockage)** | **Safe** (app.safe.global). | Contrat multi-signatures qui détient les capitaux (`mooTokens`) à l'abri. |
+
+### 2. Financement Initial (Test In-Prod avec vos 10 USDC)
+
+* **Approvisionnement Gaz :** Achetez ~3 € d'Éther (ETH) sur Coinbase, puis transférez-les vers l'adresse de votre **Hot Wallet** en sélectionnant impérativement le réseau **Base**.
+* **Dépôt du Principal :** Transférez vos 10 USDC depuis Coinbase directement vers l'adresse de votre **Safe (Cold Wallet)** sur le réseau **Base**.
+
+### 3. Initialisation On-Chain Obligatoire (À faire une seule fois)
+
+Avant de lancer le bot en mode automatique, vous devez accorder les permissions nécessaires au Hot Wallet :
+
+1. Connectez-vous sur l'interface de votre Safe.
+2. Déposez vos USDC dans le vault Beefy ciblé pour obtenir les jetons de reçu (`mooTokens`).
+3. Utilisez l'outil de transaction du Safe pour appeler la fonction `approve(spender=HOT_WALLET_ADDRESS, value=MAX_INT)` sur le contrat du **mooToken**.
+*> Note : C'est cette étape cruciale qui permettra au script de rapatrier les fonds en cas de depeg.*
+
+### 4. Configuration de l'environnement Render
+
+Dans l'interface d'administration de Render, renseignez les variables d'environnement suivantes dans votre *Dashboard* (ne jamais les écrire dans le code) :
+
+* `L2_RPC_URLS` : (Liste de RPC Base, ex: `https://mainnet.base.org,https://base.llamarpc.com`)
+* `HOT_WALLET_ADDRESS` : L'adresse de votre bot.
+* `HOT_WALLET_PRIVATE_KEY` : La clé privée de votre bot.
+* `COLD_WALLET_ADDRESS` : L'adresse de votre Safe.
+* `DEFI_VAULT_ADDRESS` : L'adresse du contrat de reçu Beefy sur Base.
+* `DISCORD_WEBHOOK_URL` : L'URL de notification de votre salon privé.

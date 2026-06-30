@@ -1,0 +1,59 @@
+name: Build and Deploy Bot
+
+on:
+  push:
+    branches: [ "main" ]
+
+env:
+  REGISTRY: ghcr.io
+  # Convertit le nom du dépôt en minuscules (requis pour Docker)
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Connexion au registre de conteneurs GitHub (GHCR)
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Extraction des tags et labels pour l'image
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=sha,format=short
+            latest
+
+      # Construction et publication de l'image Docker
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      # Déclenchement du webhook de déploiement automatique de Render
+      - name: Trigger Render Deployment
+        run: |
+          if [ -n "${{ secrets.RENDER_DEPLOY_HOOK_URL }}" ]; then
+            echo "Déclenchement du webhook Render..."
+            curl -s "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
+          else
+            echo "Le secret RENDER_DEPLOY_HOOK_URL n'est pas configuré. Étape de déploiement ignorée."
+          fi

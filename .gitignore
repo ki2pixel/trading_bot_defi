@@ -1,0 +1,21 @@
+# Python virtualenv & caches
+.venv/
+venv/
+ENV/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Local configurations & secrets
+.env
+.env.local
+.env.production
+.env.development
+.env.staging
+.env.example.local
+
+# Logs
+logs/
+*.log
