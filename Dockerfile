@@ -15,12 +15,18 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
+# Créer un utilisateur non-root pour l'exécution sécurisée
+RUN useradd -m -r botuser && mkdir -p /app/logs && chown -R botuser:botuser /app
+
 # Récupérer les dépendances installées de l'étape de construction
-COPY --from=builder /root/.local /root/.local
-COPY . .
+COPY --from=builder /root/.local /home/botuser/.local
+COPY --chown=botuser:botuser . .
+
+# Passer à l'utilisateur non-root
+USER botuser
 
 # Mettre à jour le PATH pour inclure le dossier bin des dépendances utilisateur
-ENV PATH=/root/.local/bin:$PATH
+ENV PATH=/home/botuser/.local/bin:$PATH
 ENV PYTHONUNBUFFERED=1
 
 # Port par défaut exposé pour le health check

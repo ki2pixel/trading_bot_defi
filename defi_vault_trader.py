@@ -5,7 +5,7 @@ Ce script permet d'interagir on-chain avec les vaults de Beefy Finance.
 Il intègre désormais :
 - Un gestionnaire de RPC avec bascule automatique (failover).
 - Un mécanisme de retry exponentiel pour gérer l'erreur NotCalm().
-- Une marge de sécurité de 15% sur les limites de gaz.
+- Une marge de sécurité configurable sur les limites de gaz.
 - Un arbre de décision à 3 niveaux face au depeg de stablecoins.
 - Une séparation de portefeuilles Hot / Cold Wallet.
 """
@@ -15,12 +15,28 @@ import sys
 import time
 import logging
 import requests
+from typing import Any, Callable, Optional
 from web3 import Web3
 from web3.exceptions import ContractLogicError
 from dotenv import load_dotenv
 
 # Charger les variables d'environnement
 load_dotenv()
+
+# --- Constantes de configuration ---
+CHAIN_MAP: dict[int, str] = {
+    42161: "arbitrum",
+    8453: "base",
+    10: "optimism",
+    137: "polygon",
+}
+PEG_THRESHOLD_STABLE = 0.99       # Au-dessus : peg stable (HOLD)
+PEG_THRESHOLD_MODERATE = 0.95     # Entre 0.95 et 0.99 : depeg modéré
+MAX_SLIPPAGE_MODERATE = 0.02      # 2% slippage max pour retrait en depeg modéré
+MAX_SLIPPAGE_CRITICAL = 40.0      # 40% tolérance pour retrait d'urgence critique
+GAS_SAFETY_MARGIN = 1.15          # 15% de marge sur l'estimation de gaz
+GAS_FALLBACK_LIMIT = 500_000      # Limite de gaz par défaut sur L2
+TX_RECEIPT_TIMEOUT = 120          # Timeout d'attente de confirmation TX (secondes)
 
 # Configuration du module de logs
 class OpSecMaskingFormatter(logging.Formatter):
@@ -118,26 +134,6 @@ if not logging.getLogger().handlers:
     logging.getLogger().addHandler(handler)
     logging.getLogger().setLevel(logging.INFO)
 
-
-def print(*args, file=None, **kwargs):
-    """
-    Redirige les appels print() vers le système de logging de Python
-    en analysant les tags de sévérité.
-    """
-    msg = " ".join(str(arg) for arg in args)
-    # Nettoyer les sauts de ligne initiaux pour l'esthétique des logs
-    msg_clean = msg.strip()
-    if not msg_clean:
-        return
-        
-    if file == sys.stderr or "[ERREUR]" in msg_clean or "Erreur" in msg_clean:
-        logger.error(msg_clean)
-    elif "[WARNING]" in msg_clean or "[WARN]" in msg_clean:
-        logger.warning(msg_clean)
-    elif "[GAS]" in msg_clean or "[TX]" in msg_clean or "[SIMULATION]" in msg_clean:
-        logger.info(msg_clean)
-    else:
-        logger.info(msg_clean)
 
 # Dictionnaire de prix de simulation (pour les tests)
 MOCK_PRICES = {}
@@ -295,7 +291,7 @@ class RPCManager:
     """
     Gère la connexion Web3 à travers une liste de RPCs avec bascule automatique (failover).
     """
-    def __init__(self, rpc_urls=None):
+    def __init__(self, rpc_urls: Optional[list[str]] = None) -> None:
         if rpc_urls is None:
             urls_str = os.getenv("L2_RPC_URLS") or os.getenv("L2_RPC_URL") or ""
             self.rpc_urls = [url.strip() for url in urls_str.split(",") if url.strip()]
@@ -303,10 +299,10 @@ class RPCManager:
             self.rpc_urls = rpc_urls
             
         self.current_index = 0
-        self.w3 = None
+        self.w3: Optional[Web3] = None
         self._connect()
         
-    def _connect(self):
+    def _connect(self) -> None:
         if not self.rpc_urls:
             self.w3 = None
             return
@@ -320,28 +316,28 @@ class RPCManager:
             w3 = Web3(Web3.HTTPProvider(url, request_kwargs={'timeout': 10}))
             if w3.is_connected():
                 self.w3 = w3
-                print(f"[RPCManager] Connecté au RPC : {url}")
+                logger.info(f"[RPCManager] Connecté au RPC : {url}")
                 return
         except Exception as e:
-            print(f"[RPCManager] Échec de connexion à {url}: {e}", file=sys.stderr)
+            logger.error(f"[RPCManager] Échec de connexion à {url}: {e}")
             
         self.w3 = None
 
-    def get_w3(self):
+    def get_w3(self) -> Optional[Web3]:
         return self.w3
         
-    def switch_rpc(self):
+    def switch_rpc(self) -> bool:
         if len(self.rpc_urls) <= 1:
-            print("[RPCManager] Aucun RPC alternatif disponible.", file=sys.stderr)
+            logger.error("[RPCManager] Aucun RPC alternatif disponible.")
             return False
             
         self.current_index = (self.current_index + 1) % len(self.rpc_urls)
         next_url = self.rpc_urls[self.current_index]
-        print(f"[RPCManager] Bascule vers le RPC de secours : {next_url}", file=sys.stderr)
+        logger.warning(f"[RPCManager] Bascule vers le RPC de secours : {next_url}")
         self._connect()
         return self.w3 is not None
 
-def execute_with_retry(rpc_manager, func, *args, max_retries=5, backoff_base=2, **kwargs):
+def execute_with_retry(rpc_manager: RPCManager, func: Callable, *args: Any, max_retries: int = 5, backoff_base: int = 2, **kwargs: Any) -> Any:
     """
     Exécute une fonction Web3 avec retry exponentiel ( NotCalm() ) et failover RPC automatique.
     """
@@ -362,14 +358,14 @@ def execute_with_retry(rpc_manager, func, *args, max_retries=5, backoff_base=2, 
             if "NotCalm" in err_str or "0x42f7c00e" in err_str:
                 attempt += 1
                 if attempt >= max_retries:
-                    print(f"[ERREUR] Échec final après {max_retries} tentatives suite à NotCalm().", file=sys.stderr)
+                    logger.error(f"Échec final après {max_retries} tentatives suite à NotCalm().")
                     raise
-                print(f"[WARNING] Volatilité détectée (NotCalm). Retentative dans {current_backoff}s (tentative {attempt}/{max_retries})...")
+                logger.warning(f"Volatilité détectée (NotCalm). Retentative dans {current_backoff}s (tentative {attempt}/{max_retries})...")
                 time.sleep(current_backoff)
                 current_backoff *= 2
             # Cas d'erreur de connexion / RPC
             elif any(err in err_str for err in ["Connection", "Timeout", "HTTP", "Response", "Provider"]):
-                print(f"[WARNING] Panne RPC détectée lors de l'appel. Tentative de failover...", file=sys.stderr)
+                logger.warning("Panne RPC détectée lors de l'appel. Tentative de failover...")
                 if not rpc_manager.switch_rpc():
                     attempt += 1
                     if attempt >= max_retries:
@@ -380,10 +376,10 @@ def execute_with_retry(rpc_manager, func, *args, max_retries=5, backoff_base=2, 
                 # Autres exceptions (ex: solde insuffisant, etc.) -> lever directement
                 raise e
 
-def send_transaction_with_safety(w3, contract_call, wallet_address, private_key=None):
+def send_transaction_with_safety(w3: Web3, contract_call: Any, wallet_address: str, private_key: Optional[str] = None) -> dict:
     """
-    Estime le gaz avec une marge de 15%, simule la transaction localement (eth_call),
-    puis la signe et l'envoie si une clé privée est configurée.
+    Estime le gaz avec une marge de sécurité configurable, simule la transaction
+    localement (eth_call), puis la signe et l'envoie si une clé privée est configurée.
     """
     from_addr = Web3.to_checksum_address(wallet_address)
     tx_fields = {
@@ -401,34 +397,34 @@ def send_transaction_with_safety(w3, contract_call, wallet_address, private_key=
 
     tx = contract_call.build_transaction(tx_fields)
     
-    # Estimation du gaz avec marge de sécurité de 15%
+    # Estimation du gaz avec marge de sécurité configurable
     try:
         estimated_gas = w3.eth.estimate_gas(tx)
-        tx['gas'] = int(estimated_gas * 1.15)
-        print(f"[GAS] Gaz estimé : {estimated_gas} -> Limite avec marge 15% : {tx['gas']}")
+        tx['gas'] = int(estimated_gas * GAS_SAFETY_MARGIN)
+        logger.info(f"[GAS] Gaz estimé : {estimated_gas} -> Limite avec marge {int((GAS_SAFETY_MARGIN - 1) * 100)}% : {tx['gas']}")
     except Exception as e:
-        tx['gas'] = 500000 # Valeur par défaut pour L2
-        print(f"[GAS] Échec de l'estimation ({e}), utilisation de la limite de repli : {tx['gas']}")
+        tx['gas'] = GAS_FALLBACK_LIMIT
+        logger.info(f"[GAS] Échec de l'estimation ({e}), utilisation de la limite de repli : {tx['gas']}")
         
     # Simulation locale (eth_call)
     try:
         w3.eth.call(tx)
-        print("[SIMULATION] Simulation eth_call réussie.")
+        logger.info("[SIMULATION] Simulation eth_call réussie.")
     except Exception as e:
-        print(f"[ERREUR SIMULATION] La transaction échouerait on-chain : {e}", file=sys.stderr)
+        logger.error(f"[SIMULATION] La transaction échouerait on-chain : {e}")
         raise e
         
     if private_key:
-        print("[TX] Signature et envoi de la transaction réelle...")
+        logger.info("[TX] Signature et envoi de la transaction réelle...")
         signed_tx = w3.eth.account.sign_transaction(tx, private_key=private_key)
         tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
-        print(f"[TX] Transaction diffusée. Hash : {tx_hash.hex()}")
-        print("[TX] En attente de confirmation...")
-        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
-        print(f"[TX] Confirmée ! Bloc : {receipt.blockNumber} (Statut: {receipt.status})")
+        logger.info(f"[TX] Transaction diffusée. Hash : {tx_hash.hex()}")
+        logger.info("[TX] En attente de confirmation...")
+        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=TX_RECEIPT_TIMEOUT)
+        logger.info(f"[TX] Confirmée ! Bloc : {receipt.blockNumber} (Statut: {receipt.status})")
         return receipt
     else:
-        print("[SIMULATION] Mode DRY-RUN (Pas de clé privée). Transaction simulée avec succès.")
+        logger.info("[SIMULATION] Mode DRY-RUN (Pas de clé privée). Transaction simulée avec succès.")
         return {"status": 1, "simulation": True, "tx": tx}
 
 # Oracle de prix stablecoins
@@ -479,7 +475,7 @@ CHAINLINK_AGGREGATOR_ABI = [
     }
 ]
 
-def get_stablecoin_price(w3, symbol, chain="arbitrum"):
+def get_stablecoin_price(w3: Optional[Web3], symbol: str, chain: str = "arbitrum") -> float:
     """
     Récupère le prix d'un stablecoin depuis Chainlink, DefiLlama, ou la simulation.
     """
@@ -493,10 +489,10 @@ def get_stablecoin_price(w3, symbol, chain="arbitrum"):
             latest_data = feed_contract.functions.latestRoundData().call()
             decimals = feed_contract.functions.decimals().call()
             price = latest_data[1] / (10 ** decimals)
-            print(f"[ORACLE] Prix Chainlink pour {symbol} sur {chain} : {price:.4f}$")
+            logger.info(f"[ORACLE] Prix Chainlink pour {symbol} sur {chain} : {price:.4f}$")
             return price
         except Exception as e:
-            print(f"[ORACLE] Échec Chainlink pour {symbol} ({e}). Utilisation du fallback DefiLlama.", file=sys.stderr)
+            logger.error(f"[ORACLE] Échec Chainlink pour {symbol} ({e}). Utilisation du fallback DefiLlama.")
             
     cg_id = COINGECKO_IDS.get(symbol.upper())
     if cg_id:
@@ -507,33 +503,33 @@ def get_stablecoin_price(w3, symbol, chain="arbitrum"):
                 data = res.json()
                 price = data.get("coins", {}).get(f"coingecko:{cg_id}", {}).get("price")
                 if price is not None:
-                    print(f"[ORACLE] Prix DefiLlama pour {symbol} : {price:.4f}$")
+                    logger.info(f"[ORACLE] Prix DefiLlama pour {symbol} : {price:.4f}$")
                     return price
         except Exception as e:
-            print(f"[ORACLE] Échec DefiLlama pour {symbol}: {e}", file=sys.stderr)
+            logger.error(f"[ORACLE] Échec DefiLlama pour {symbol}: {e}")
             
-    print(f"[ORACLE] Prix par défaut (1.00$) pour {symbol}")
+    logger.info(f"[ORACLE] Prix par défaut (1.00$) pour {symbol}")
     return 1.0
 
-def trigger_withdrawal_flow(w3, vault_contract, shares, hot_wallet, private_key=None, cold_wallet=None, max_slippage_pct=2.0):
+def trigger_withdrawal_flow(w3: Optional[Web3], vault_contract: Any, shares: int, hot_wallet: str, private_key: Optional[str] = None, cold_wallet: Optional[str] = None, max_slippage_pct: float = 2.0) -> str:
     """
     Gère le flux de retrait des parts, avec support de la ségrégation Hot/Cold wallet.
     """
     hot_addr = Web3.to_checksum_address(hot_wallet)
     
     if not cold_wallet:
-        print(f"[RETRAIT] Lancement du retrait direct de {shares / (10**18):.4f} parts.")
+        logger.info(f"[RETRAIT] Lancement du retrait direct de {shares / (10**18):.4f} parts.")
         withdraw_call = vault_contract.functions.withdraw(shares)
         if w3:
             send_transaction_with_safety(w3, withdraw_call, hot_addr, private_key)
         else:
-            print(f"[Simulation] withdraw(shares={shares})")
+            logger.info(f"[Simulation] withdraw(shares={shares})")
         return "WITHDRAWN"
         
     cold_addr = Web3.to_checksum_address(cold_wallet)
-    print(f"[RETRAIT COLD] Démarrage du flux sécurisé Hot/Cold Wallet.")
-    print(f"  Hot Wallet (Exécuteur transaction) : {hot_addr}")
-    print(f"  Cold Wallet (Propriétaire des parts) : {cold_addr}")
+    logger.info("[RETRAIT COLD] Démarrage du flux sécurisé Hot/Cold Wallet.")
+    logger.info(f"  Hot Wallet (Exécuteur transaction) : {hot_addr}")
+    logger.info(f"  Cold Wallet (Propriétaire des parts) : {cold_addr}")
     
     try:
         hot_shares = vault_contract.functions.balanceOf(hot_addr).call()
@@ -542,8 +538,8 @@ def trigger_withdrawal_flow(w3, vault_contract, shares, hot_wallet, private_key=
         
     if hot_shares < shares:
         needed = shares - hot_shares
-        print(f"[RETRAIT COLD] Le Hot Wallet ne possède pas assez de parts ({hot_shares/(10**18):.2f} < {shares/(10**18):.2f}).")
-        print(f"[RETRAIT COLD] Récupération de {needed/(10**18):.4f} parts depuis le Cold Wallet...")
+        logger.info(f"[RETRAIT COLD] Le Hot Wallet ne possède pas assez de parts ({hot_shares/(10**18):.2f} < {shares/(10**18):.2f}).")
+        logger.info(f"[RETRAIT COLD] Récupération de {needed/(10**18):.4f} parts depuis le Cold Wallet...")
         
         try:
             allowance = vault_contract.functions.allowance(cold_addr, hot_addr).call()
@@ -552,22 +548,22 @@ def trigger_withdrawal_flow(w3, vault_contract, shares, hot_wallet, private_key=
             
         if allowance < needed:
             msg = f"[ERREUR COLD] Le Cold Wallet n'a pas approuvé le Hot Wallet pour gérer les mooTokens (Allowance: {allowance/(10**18):.4f} < Requis: {needed/(10**18):.4f}). Action annulée."
-            print(msg, file=sys.stderr)
+            logger.error(msg)
             raise PermissionError(msg)
             
         transfer_from_call = vault_contract.functions.transferFrom(cold_addr, hot_addr, needed)
         if w3:
             send_transaction_with_safety(w3, transfer_from_call, hot_addr, private_key)
         else:
-            print(f"[Simulation] transferFrom(from={cold_addr}, to={hot_addr}, value={needed})")
+            logger.info(f"[Simulation] transferFrom(from={cold_addr}, to={hot_addr}, value={needed})")
             
     # Étape 2 : Retrait
-    print(f"[RETRAIT COLD] Retrait de {shares / (10**18):.4f} parts...")
+    logger.info(f"[RETRAIT COLD] Retrait de {shares / (10**18):.4f} parts...")
     withdraw_call = vault_contract.functions.withdraw(shares)
     if w3:
         send_transaction_with_safety(w3, withdraw_call, hot_addr, private_key)
     else:
-        print(f"[Simulation] withdraw(shares={shares})")
+        logger.info(f"[Simulation] withdraw(shares={shares})")
         
     # Étape 3 : Rapatrier les fonds vers le Cold Wallet
     try:
@@ -585,21 +581,21 @@ def trigger_withdrawal_flow(w3, vault_contract, shares, hot_wallet, private_key=
         hot_want_balance = int(shares / (10**18) * (10**6))
         want_contract = None
         
-    print(f"[RETRAIT COLD] Transfert de {hot_want_balance / (10 ** want_decimals):.2f} {want_symbol} vers le Cold Wallet...")
+    logger.info(f"[RETRAIT COLD] Transfert de {hot_want_balance / (10 ** want_decimals):.2f} {want_symbol} vers le Cold Wallet...")
     if w3 and want_contract:
         transfer_back_call = want_contract.functions.transfer(cold_addr, hot_want_balance)
         send_transaction_with_safety(w3, transfer_back_call, hot_addr, private_key)
     else:
-        print(f"[Simulation] transfer(to={cold_addr}, value={hot_want_balance}) sur {want_symbol}")
+        logger.info(f"[Simulation] transfer(to={cold_addr}, value={hot_want_balance}) sur {want_symbol}")
         
-    print("[RETRAIT COLD] Flux sécurisé Hot/Cold Wallet terminé avec succès.")
+    logger.info("[RETRAIT COLD] Flux sécurisé Hot/Cold Wallet terminé avec succès.")
     return "WITHDRAWN"
 
-def check_depeg_and_execute_strategy(w3, vault_address, wallet_address, private_key=None, cold_wallet=None):
+def check_depeg_and_execute_strategy(w3: Optional[Web3], vault_address: str, wallet_address: str, private_key: Optional[str] = None, cold_wallet: Optional[str] = None) -> str:
     """
     Arbre de décision à 3 niveaux face au depeg de stablecoins.
     """
-    print("\n=== Lancement de la vérification de peg ===")
+    logger.info("=== Lancement de la vérification de peg ===")
     v_addr = Web3.to_checksum_address(vault_address)
     vault_contract = w3.eth.contract(address=v_addr, abi=BEEFY_VAULT_ABI) if w3 else None
     
@@ -607,12 +603,7 @@ def check_depeg_and_execute_strategy(w3, vault_address, wallet_address, private_
     if w3:
         try:
             chain_id = w3.eth.chain_id
-            if chain_id == 8453:
-                chain = "base"
-            elif chain_id == 10:
-                chain = "optimism"
-            elif chain_id == 137:
-                chain = "polygon"
+            chain = CHAIN_MAP.get(chain_id, "arbitrum")
         except Exception:
             pass
             
@@ -630,21 +621,21 @@ def check_depeg_and_execute_strategy(w3, vault_address, wallet_address, private_
             assets = [a.strip() for a in clean_sym.split(sep)]
             break
             
-    print(f"Actifs sous-jacents détectés : {assets}")
+    logger.info(f"Actifs sous-jacents détectés : {assets}")
     prices = {}
     for asset in assets:
         prices[asset] = get_stablecoin_price(w3, asset, chain=chain)
         
     min_price = min(prices.values())
     depegged_asset = min(prices, key=prices.get)
-    print(f"Prix le plus bas constaté : {min_price:.4f}$ ({depegged_asset})")
+    logger.info(f"Prix le plus bas constaté : {min_price:.4f}$ ({depegged_asset})")
     
-    if min_price >= 0.99:
-        print(f"[DECISION] Pég stable ou Micro-depeg ({min_price:.4f}$ >= 0.99$). Action: HOLD (Maintien de la position).")
+    if min_price >= PEG_THRESHOLD_STABLE:
+        logger.info(f"[DECISION] Pég stable ou Micro-depeg ({min_price:.4f}$ >= {PEG_THRESHOLD_STABLE}$). Action: HOLD (Maintien de la position).")
         return "HOLD"
         
-    elif 0.95 <= min_price < 0.99:
-        print(f"[DECISION] Depeg MODÉRÉ détecté ({min_price:.4f}$ pour {depegged_asset}). Simulation du retrait via eth_call...")
+    elif PEG_THRESHOLD_MODERATE <= min_price < PEG_THRESHOLD_STABLE:
+        logger.info(f"[DECISION] Depeg MODÉRÉ détecté ({min_price:.4f}$ pour {depegged_asset}). Simulation du retrait via eth_call...")
         
         target_holder = cold_wallet if cold_wallet else wallet_address
         try:
@@ -672,20 +663,20 @@ def check_depeg_and_execute_strategy(w3, vault_address, wallet_address, private_
                 slippage = 1.0 - (redeemable_want_normalized / theoretical_want_normalized)
             else:
                 slippage = 0.0
-            print(f"[SIMULATION] Reçu théorique : {theoretical_want_normalized:.2f} | Simulé : {redeemable_want_normalized:.2f} | Slippage estimé : {slippage*100:.2f}%")
+            logger.info(f"[SIMULATION] Reçu théorique : {theoretical_want_normalized:.2f} | Simulé : {redeemable_want_normalized:.2f} | Slippage estimé : {slippage*100:.2f}%")
         except Exception as e:
             slippage = (1.0 - min_price) * 0.5
-            print(f"[SIMULATION] Impossible de simuler previewRedeem ({e}). Slippage simulé théorique : {slippage*100:.2f}%")
+            logger.info(f"[SIMULATION] Impossible de simuler previewRedeem ({e}). Slippage simulé théorique : {slippage*100:.2f}%")
             
-        if slippage <= 0.02:
-            print(f"[DECISION] Slippage effectif ({slippage*100:.2f}%) <= 2%. Retrait sécurisé. Exécution de la liquidation progressive...")
-            return trigger_withdrawal_flow(w3, vault_contract, user_shares, wallet_address, private_key, cold_wallet, max_slippage_pct=2.0)
+        if slippage <= MAX_SLIPPAGE_MODERATE:
+            logger.info(f"[DECISION] Slippage effectif ({slippage*100:.2f}%) <= {MAX_SLIPPAGE_MODERATE*100:.0f}%. Retrait sécurisé. Exécution de la liquidation progressive...")
+            return trigger_withdrawal_flow(w3, vault_contract, user_shares, wallet_address, private_key, cold_wallet, max_slippage_pct=MAX_SLIPPAGE_MODERATE * 100)
         else:
-            print(f"[DECISION] Slippage effectif ({slippage*100:.2f}%) > 2%. Annulation du retrait pour éviter l'arbitrage MEV.")
+            logger.info(f"[DECISION] Slippage effectif ({slippage*100:.2f}%) > {MAX_SLIPPAGE_MODERATE*100:.0f}%. Annulation du retrait pour éviter l'arbitrage MEV.")
             return "HOLD"
             
-    else: # min_price < 0.95
-        print(f"[DECISION] DEPEG CRITIQUE DÉTECTÉ ({min_price:.4f}$ < 0.95$). Retrait d'urgence avec tolérance élevée au slippage (40%).")
+    else: # min_price < PEG_THRESHOLD_MODERATE
+        logger.info(f"[DECISION] DEPEG CRITIQUE DÉTECTÉ ({min_price:.4f}$ < {PEG_THRESHOLD_MODERATE}$). Retrait d'urgence avec tolérance élevée au slippage ({MAX_SLIPPAGE_CRITICAL}%).")
         target_holder = cold_wallet if cold_wallet else wallet_address
         try:
             user_shares = vault_contract.functions.balanceOf(Web3.to_checksum_address(target_holder)).call()
@@ -696,12 +687,12 @@ def check_depeg_and_execute_strategy(w3, vault_address, wallet_address, private_
             user_shares = 100 * (10 ** 18)
             
         if w3 and vault_contract:
-            return trigger_withdrawal_flow(w3, vault_contract, user_shares, wallet_address, private_key, cold_wallet, max_slippage_pct=40.0)
+            return trigger_withdrawal_flow(w3, vault_contract, user_shares, wallet_address, private_key, cold_wallet, max_slippage_pct=MAX_SLIPPAGE_CRITICAL)
         else:
             # En mode simulation pure
-            return trigger_withdrawal_flow(None, None, user_shares, wallet_address, private_key, cold_wallet, max_slippage_pct=40.0)
+            return trigger_withdrawal_flow(None, None, user_shares, wallet_address, private_key, cold_wallet, max_slippage_pct=MAX_SLIPPAGE_CRITICAL)
 
-def query_vault_info(w3, vault_address, wallet_address):
+def query_vault_info(w3: Web3, vault_address: str, wallet_address: str) -> dict:
     """
     Récupère les informations réelles d'un vault Beefy à l'aide de Web3.
     """
@@ -749,10 +740,10 @@ def query_vault_info(w3, vault_address, wallet_address):
             "raw_allowance": user_allowance
         }
     except Exception as e:
-        print(f"Erreur lors de la lecture on-chain : {e}", file=sys.stderr)
+        logger.error(f"Erreur lors de la lecture on-chain : {e}")
         return {"connected": False, "error": str(e)}
 
-def run_simulation(vault_address, wallet_address):
+def run_simulation(vault_address: str, wallet_address: str) -> dict:
     """
     Simule les données du vault pour la démonstration si aucun RPC n'est configuré.
     """
@@ -772,62 +763,62 @@ def run_simulation(vault_address, wallet_address):
         "raw_allowance": 0
     }
 
-def print_report(data):
+def print_report(data: dict) -> None:
     """
     Affiche un résumé structuré des informations du vault.
     """
-    print("\n=== INFORMATIONS DU VAULT DEFI ===")
+    logger.info("=== INFORMATIONS DU VAULT DEFI ===")
     if not data.get("connected"):
-        print("[!] MODE SIMULATION (Aucune connexion RPC configurée)")
+        logger.info("[!] MODE SIMULATION (Aucune connexion RPC configurée)")
         
-    print(f"Adresse du Vault : {data['vault_address']}")
-    print(f"Token sous-jacent: {data['want_symbol']} ({data['want_address']})")
-    print(f"Actifs totaux sous gestion : {data['total_vault_assets']:,.2f} {data['want_symbol']}")
-    print(f"Taux multiplicateur (Price per Share) : {data['price_per_share']:.6f} {data['want_symbol']}/mooToken")
-    print("-" * 50)
-    print("=== SOLDE ET PORTEFEUILLE UTILISATEUR ===")
-    print(f"Solde dans le portefeuille : {data['user_want_balance']:.2f} {data['want_symbol']}")
-    print(f"Solde de parts (mooTokens) : {data['user_moo_balance']:.6f} moo{data['want_symbol']}")
-    print(f"Valeur équivalente sous-jacente : {data['user_underlying_value']:.4f} {data['want_symbol']}")
-    print(f"Autorisation de dépense (Allowance) : {data['user_allowance']:.2f} {data['want_symbol']}")
-    print("-" * 50)
+    logger.info(f"Adresse du Vault : {data['vault_address']}")
+    logger.info(f"Token sous-jacent: {data['want_symbol']} ({data['want_address']})")
+    logger.info(f"Actifs totaux sous gestion : {data['total_vault_assets']:,.2f} {data['want_symbol']}")
+    logger.info(f"Taux multiplicateur (Price per Share) : {data['price_per_share']:.6f} {data['want_symbol']}/mooToken")
+    logger.info("-" * 50)
+    logger.info("=== SOLDE ET PORTEFEUILLE UTILISATEUR ===")
+    logger.info(f"Solde dans le portefeuille : {data['user_want_balance']:.2f} {data['want_symbol']}")
+    logger.info(f"Solde de parts (mooTokens) : {data['user_moo_balance']:.6f} moo{data['want_symbol']}")
+    logger.info(f"Valeur équivalente sous-jacente : {data['user_underlying_value']:.4f} {data['want_symbol']}")
+    logger.info(f"Autorisation de dépense (Allowance) : {data['user_allowance']:.2f} {data['want_symbol']}")
+    logger.info("-" * 50)
 
-def prepare_deposit(w3, data, amount_to_deposit):
+def prepare_deposit(w3: Optional[Web3], data: dict, amount_to_deposit: float) -> None:
     """
     Simule ou prépare les transactions de dépôt.
     """
-    print(f"\n--- PRÉPARATION DU DÉPÔT : {amount_to_deposit} {data['want_symbol']} ---")
+    logger.info(f"--- PRÉPARATION DU DÉPÔT : {amount_to_deposit} {data['want_symbol']} ---")
     raw_amount = int(amount_to_deposit * (10 ** data['want_decimals']))
     
     if data['user_want_balance'] < amount_to_deposit:
-        print(f"[ERREUR] Solde insuffisant. Vous avez {data['user_want_balance']} {data['want_symbol']} et tentez de déposer {amount_to_deposit}.")
+        logger.error(f"Solde insuffisant. Vous avez {data['user_want_balance']} {data['want_symbol']} et tentez de déposer {amount_to_deposit}.")
         return
         
     if data['user_allowance'] < amount_to_deposit:
-        print(f"[1/2] L'autorisation de dépense est insuffisante ({data['user_allowance']} < {amount_to_deposit}).")
-        print(">> Transaction d'approbation requise (ERC20 approve) :")
-        print(f"   [Simulation] approve(spender={data['vault_address']}, value={raw_amount}) sur {data['want_address']}")
+        logger.info(f"[1/2] L'autorisation de dépense est insuffisante ({data['user_allowance']} < {amount_to_deposit}).")
+        logger.info(">> Transaction d'approbation requise (ERC20 approve) :")
+        logger.info(f"   [Simulation] approve(spender={data['vault_address']}, value={raw_amount}) sur {data['want_address']}")
     else:
-        print("[1/2] L'autorisation de dépense (Allowance) est suffisante. Pas d'approbation requise.")
+        logger.info("[1/2] L'autorisation de dépense (Allowance) est suffisante. Pas d'approbation requise.")
         
-    print(">> Transaction de dépôt requise (Beefy deposit) :")
-    print(f"   [Simulation] deposit(amount={raw_amount}) sur le vault {data['vault_address']}")
+    logger.info(">> Transaction de dépôt requise (Beefy deposit) :")
+    logger.info(f"   [Simulation] deposit(amount={raw_amount}) sur le vault {data['vault_address']}")
 
-def prepare_withdrawal(w3, data, shares_to_withdraw):
+def prepare_withdrawal(w3: Optional[Web3], data: dict, shares_to_withdraw: float) -> None:
     """
     Simule ou prépare les transactions de retrait.
     """
-    print(f"\n--- PRÉPARATION DU RETRAIT : {shares_to_withdraw} moo{data['want_symbol']} ---")
+    logger.info(f"--- PRÉPARATION DU RETRAIT : {shares_to_withdraw} moo{data['want_symbol']} ---")
     raw_shares = int(shares_to_withdraw * (10 ** 18))
     
     if data['user_moo_balance'] < shares_to_withdraw:
-        print(f"[ERREUR] Solde de parts insuffisant. Vous possédez {data['user_moo_balance']} mooTokens et tentez de retirer {shares_to_withdraw}.")
+        logger.error(f"Solde de parts insuffisant. Vous possédez {data['user_moo_balance']} mooTokens et tentez de retirer {shares_to_withdraw}.")
         return
         
-    print(">> Transaction de retrait requise (Beefy withdraw) :")
+    logger.info(">> Transaction de retrait requise (Beefy withdraw) :")
     estimated_underlying = shares_to_withdraw * data['price_per_share']
-    print(f"   [Simulation] withdraw(shares={raw_shares}) sur le vault {data['vault_address']}")
-    print(f"   [Simulation] Vous récupérerez environ : {estimated_underlying:.4f} {data['want_symbol']}")
+    logger.info(f"   [Simulation] withdraw(shares={raw_shares}) sur le vault {data['vault_address']}")
+    logger.info(f"   [Simulation] Vous récupérerez environ : {estimated_underlying:.4f} {data['want_symbol']}")
 
 def main():
     import argparse
@@ -862,21 +853,21 @@ def main():
         MOCK_PRICES["USDC"] = args.simulate_depeg
         MOCK_PRICES["USDT"] = args.simulate_depeg
         MOCK_PRICES["DAI"] = args.simulate_depeg
-        print(f"[TEST] Simulation d'un prix de stablecoin à {args.simulate_depeg}$")
+        logger.info(f"[TEST] Simulation d'un prix de stablecoin à {args.simulate_depeg}$")
         
-    print("Initialisation du gestionnaire de RPC...")
+    logger.info("Initialisation du gestionnaire de RPC...")
     rpc_manager = RPCManager()
     w3 = rpc_manager.get_w3()
     
     if w3:
-        print("Connexion active. Lecture des informations du vault...")
+        logger.info("Connexion active. Lecture des informations du vault...")
         data = execute_with_retry(rpc_manager, query_vault_info, vault_address, cold_wallet if cold_wallet else hot_wallet)
     else:
-        print("Aucune connexion RPC. Mode simulation.")
+        logger.info("Aucune connexion RPC. Mode simulation.")
         data = run_simulation(vault_address, cold_wallet if cold_wallet else hot_wallet)
         
     if "error" in data:
-        print(f"Impossible de récupérer les informations du vault: {data['error']}", file=sys.stderr)
+        logger.error(f"Impossible de récupérer les informations du vault: {data['error']}")
         sys.exit(1)
         
     print_report(data)
@@ -899,20 +890,20 @@ def main():
         raw_amount = int(args.deposit * (10 ** data['want_decimals']))
         
         if data['user_allowance'] < args.deposit:
-            print(f"Autorisation de dépense insuffisante ({data['user_allowance']} < {args.deposit}).")
+            logger.info(f"Autorisation de dépense insuffisante ({data['user_allowance']} < {args.deposit}).")
             if w3 and want_contract:
                 approve_call = want_contract.functions.approve(v_addr, raw_amount)
                 execute_with_retry(rpc_manager, send_transaction_with_safety, approve_call, hot_wallet, private_key)
             else:
-                print(f"[Simulation] approve(spender={v_addr}, value={raw_amount})")
+                logger.info(f"[Simulation] approve(spender={v_addr}, value={raw_amount})")
         else:
-            print("Allowance suffisante.")
+            logger.info("Allowance suffisante.")
             
         if w3 and vault_contract:
             deposit_call = vault_contract.functions.deposit(raw_amount)
             execute_with_retry(rpc_manager, send_transaction_with_safety, deposit_call, hot_wallet, private_key)
         else:
-            print(f"[Simulation] deposit(amount={raw_amount})")
+            logger.info(f"[Simulation] deposit(amount={raw_amount})")
             
     elif args.withdraw is not None:
         v_addr = Web3.to_checksum_address(vault_address)
@@ -929,7 +920,7 @@ def main():
             cold_wallet=cold_wallet
         )
     else:
-        print("\n--- MODE DÉMO PAR DÉFAUT ---")
+        logger.info("--- MODE DÉMO PAR DÉFAUT ---")
         prepare_deposit(w3, data, 100.0)
         prepare_withdrawal(w3, data, 50.0)
 

@@ -39,7 +39,7 @@ def fetch_beefy_data():
 
     return vaults, apys
 
-def is_stable_vault(vault):
+def is_stable_vault(vault: dict) -> bool:
     """
     Vérifie si un vault contient uniquement des stablecoins dans ses actifs.
     """
@@ -61,7 +61,7 @@ def is_stable_vault(vault):
             
     return True
 
-def calculate_break_even(current_apy, new_apy, capital, days, zap_in, zap_out, withdraw, slippage):
+def calculate_break_even(current_apy: float, new_apy: float, capital: float, days: int, zap_in: float, zap_out: float, withdraw: float, slippage: float) -> tuple[bool, float, float, float]:
     """
     Calcule si migrer vers un nouveau vault est rentable après prise en compte des frais.
     Retourne (is_profitable, net_profit, break_even_apy, total_friction_pct)
@@ -97,7 +97,7 @@ def calculate_break_even(current_apy, new_apy, capital, days, zap_in, zap_out, w
         
     return is_profitable, net_profit, break_even_apy, total_friction_rate * 100.0
 
-def filter_and_rank_vaults(vaults, apys, chains=None, min_apy=0.0):
+def filter_and_rank_vaults(vaults: list[dict], apys: dict, chains: set[str] | None = None, min_apy: float = 0.0) -> list[dict]:
     """
     Filtre les vaults actifs selon les critères (L2, stablecoins) et les classe par APY.
     """

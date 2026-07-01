@@ -1,10 +1,11 @@
 import os
 import requests
 import logging
+from typing import Optional
 
 logger = logging.getLogger("alerts")
 
-def send_alert(title, message, status="info", details=None):
+def send_alert(title: str, message: str, status: str = "info", details: Optional[dict[str, str]] = None) -> None:
     """
     Sends alerts to Discord and/or Telegram based on environment configuration.
     

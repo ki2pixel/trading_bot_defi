@@ -1,18 +1,18 @@
 import pytest
 from unittest.mock import MagicMock, patch
+from conftest import HOT_ADDR, COLD_ADDR, VAULT_ADDR, WANT_ADDR, setup_mock_w3
 from defi_vault_trader import (
     RPCManager,
     execute_with_retry,
     get_stablecoin_price,
     check_depeg_and_execute_strategy,
+    send_transaction_with_safety,
+    GAS_SAFETY_MARGIN,
+    GAS_FALLBACK_LIMIT,
+    TX_RECEIPT_TIMEOUT,
     MOCK_PRICES
 )
 
-# Adresses fictives valides pour les tests
-HOT_ADDR = "0x1111111111111111111111111111111111111111"
-COLD_ADDR = "0x2222222222222222222222222222222222222222"
-VAULT_ADDR = "0x3333333333333333333333333333333333333333"
-WANT_ADDR = "0x4444444444444444444444444444444444444444"
 
 def test_rpc_manager_failover():
     urls = ["https://rpc1.com", "https://rpc2.com"]
@@ -90,33 +90,6 @@ def test_depeg_decision_tree_hold():
     
     decision = check_depeg_and_execute_strategy(None, VAULT_ADDR, HOT_ADDR)
     assert decision == "HOLD"
-
-def setup_mock_w3(preview_redeem_value=99 * (10**6), price_share_value=1 * (10**18)):
-    mock_w3 = MagicMock()
-    
-    # Mock du contrat want
-    mock_want = MagicMock()
-    mock_want.functions.symbol.return_value.call.return_value = "USDC"
-    mock_want.functions.decimals.return_value.call.return_value = 6
-    mock_want.functions.balanceOf.return_value.call.return_value = 0
-    
-    # Mock du vault
-    mock_vault = MagicMock()
-    mock_vault.address = VAULT_ADDR
-    mock_vault.functions.want.return_value.call.return_value = WANT_ADDR
-    mock_vault.functions.balanceOf.return_value.call.return_value = 100 * (10**18)
-    mock_vault.functions.previewRedeem.return_value.call.return_value = preview_redeem_value
-    mock_vault.functions.getPricePerFullShare.return_value.call.return_value = price_share_value
-    mock_vault.functions.allowance.return_value.call.return_value = 0
-    
-    # Routage du constructeur de contrat
-    def contract_side_effect(address, abi):
-        if address == WANT_ADDR:
-            return mock_want
-        return mock_vault
-        
-    mock_w3.eth.contract.side_effect = contract_side_effect
-    return mock_w3, mock_vault
 
 @patch("defi_vault_trader.trigger_withdrawal_flow")
 def test_depeg_decision_tree_moderate_exit_ok(mock_withdraw):
@@ -214,3 +187,89 @@ def test_opsec_masking_formatter():
         rec4 = logging.LogRecord("test", logging.INFO, "path", 1, "Connecting to https://base.llamarpc.com/key123", (), None)
         assert "https://base.llamarpc.com/***" in formatter.format(rec4)
 
+
+# --- Tests pour send_transaction_with_safety ---
+
+class TestSendTransactionWithSafety:
+    """Tests pour la fonction send_transaction_with_safety."""
+
+    def _build_mock_w3(self, estimated_gas=100_000, base_fee=1000, priority_fee=100):
+        mock_w3 = MagicMock()
+        mock_w3.eth.get_transaction_count.return_value = 5
+        mock_w3.eth.get_block.return_value = {"baseFeePerGas": base_fee}
+        mock_w3.eth.max_priority_fee = priority_fee
+        mock_w3.eth.estimate_gas.return_value = estimated_gas
+        mock_w3.eth.call.return_value = b""
+        
+        mock_contract_call = MagicMock()
+        mock_contract_call.build_transaction.return_value = {
+            "from": HOT_ADDR,
+            "nonce": 5,
+            "maxPriorityFeePerGas": priority_fee,
+            "maxFeePerGas": int(base_fee * 1.25) + priority_fee,
+        }
+        return mock_w3, mock_contract_call
+
+    def test_gas_estimation_with_safety_margin(self):
+        mock_w3, mock_call = self._build_mock_w3(estimated_gas=100_000)
+        
+        result = send_transaction_with_safety(mock_w3, mock_call, HOT_ADDR)
+        
+        assert result["simulation"] is True
+        assert result["status"] == 1
+        assert result["tx"]["gas"] == int(100_000 * GAS_SAFETY_MARGIN)
+
+    def test_gas_fallback_on_estimation_failure(self):
+        mock_w3, mock_call = self._build_mock_w3()
+        mock_w3.eth.estimate_gas.side_effect = Exception("estimation failed")
+        
+        result = send_transaction_with_safety(mock_w3, mock_call, HOT_ADDR)
+        
+        assert result["tx"]["gas"] == GAS_FALLBACK_LIMIT
+
+    def test_simulation_failure_raises_exception(self):
+        mock_w3, mock_call = self._build_mock_w3()
+        mock_w3.eth.call.side_effect = Exception("execution reverted: InsufficientBalance")
+        
+        with pytest.raises(Exception, match="InsufficientBalance"):
+            send_transaction_with_safety(mock_w3, mock_call, HOT_ADDR)
+
+    def test_dry_run_without_private_key(self):
+        mock_w3, mock_call = self._build_mock_w3()
+        
+        result = send_transaction_with_safety(mock_w3, mock_call, HOT_ADDR, private_key=None)
+        
+        assert result["simulation"] is True
+        assert result["status"] == 1
+
+    def test_real_transaction_with_private_key(self):
+        mock_w3, mock_call = self._build_mock_w3()
+        mock_signed = MagicMock()
+        mock_signed.rawTransaction = b"signed_tx_bytes"
+        mock_w3.eth.account.sign_transaction.return_value = mock_signed
+        mock_w3.eth.send_raw_transaction.return_value = b"\x01" * 32
+        mock_w3.eth.wait_for_transaction_receipt.return_value = MagicMock(
+            blockNumber=12345, status=1
+        )
+        
+        result = send_transaction_with_safety(
+            mock_w3, mock_call, HOT_ADDR, private_key="0xfakeprivatekey"
+        )
+        
+        mock_w3.eth.account.sign_transaction.assert_called_once()
+        mock_w3.eth.send_raw_transaction.assert_called_once()
+        mock_w3.eth.wait_for_transaction_receipt.assert_called_once()
+        assert result.blockNumber == 12345
+
+    def test_legacy_gas_price_fallback(self):
+        mock_w3, mock_call = self._build_mock_w3()
+        # Simuler une chaîne sans EIP-1559
+        mock_w3.eth.get_block.return_value = {}  # pas de baseFeePerGas
+        mock_w3.eth.max_priority_fee = property(lambda self: (_ for _ in ()).throw(Exception("not supported")))
+        mock_w3.eth.gas_price = 5000000000
+        
+        mock_call.build_transaction.side_effect = lambda fields: {**fields, "gas": 100000}
+        
+        # Ne devrait pas lever d'exception
+        result = send_transaction_with_safety(mock_w3, mock_call, HOT_ADDR)
+        assert result["status"] == 1

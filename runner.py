@@ -11,8 +11,11 @@ import time
 import logging
 import logging.handlers
 import threading
+import functools
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, Response
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 # Charger les variables d'environnement
 load_dotenv()
@@ -30,6 +33,7 @@ from alerts import send_alert
 
 # État global partagé pour le health check et événement de réveil
 trigger_event = threading.Event()
+health_lock = threading.Lock()
 
 HEALTH_DATA = {
     "status": "starting",
@@ -48,9 +52,43 @@ HEALTH_DATA = {
 # Configuration du serveur de Health Check Flask et Dashboard statique
 app = Flask("DeFiBotHealthCheck", static_folder="static")
 
+# Rate limiting pour protéger contre le DoS
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=[],
+    storage_uri="memory://",
+)
+
 # Désactiver les logs de requêtes Flask par défaut pour ne pas polluer les logs de prod
 log_werkzeug = logging.getLogger('werkzeug')
 log_werkzeug.setLevel(logging.WARNING)
+
+# --- Authentification API Key ---
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "").strip()
+
+def require_api_key(f):
+    """
+    Décorateur pour protéger les endpoints sensibles avec une API key.
+    Vérifie le header Authorization: Bearer <key> ou le query param ?api_key=<key>.
+    """
+    @functools.wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not ADMIN_API_KEY:
+            # Pas de clé configurée = endpoints ouverts (rétrocompatibilité)
+            return f(*args, **kwargs)
+        
+        # Vérifier le header Authorization
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer ") and auth_header[7:] == ADMIN_API_KEY:
+            return f(*args, **kwargs)
+        
+        # Vérifier le query param
+        if request.args.get("api_key") == ADMIN_API_KEY:
+            return f(*args, **kwargs)
+        
+        return jsonify({"error": "Unauthorized. Provide a valid API key via Authorization header or api_key query param."}), 401
+    return decorated_function
 
 @app.route("/")
 def index():
@@ -60,52 +98,60 @@ def index():
     return app.send_static_file("index.html")
 
 @app.route("/health", methods=["GET"])
+@limiter.limit("60/minute")
 def health_check():
     """
     Expose l'état actuel et les métriques d'exécution du bot.
     Renvoie 200 OK si le bot tourne normalement, 500 Internal Server Error si bloqué en erreur.
     """
-    # Si plus de 3 erreurs consécutives sans succès, on considère le bot comme en mauvaise santé
-    is_healthy = HEALTH_DATA["errors_since_success"] <= 3
-    status_code = 200 if is_healthy else 500
-    
-    response_data = {
-        "status": HEALTH_DATA["status"],
-        "rpc_connected": HEALTH_DATA["rpc_connected"],
-        "last_block_analyzed": HEALTH_DATA["last_block_analyzed"],
-        "last_check_time_utc": time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(HEALTH_DATA["last_check_timestamp"])) if HEALTH_DATA["last_check_timestamp"] else None,
-        "errors_since_success": HEALTH_DATA["errors_since_success"],
-        "last_decision": HEALTH_DATA["last_decision"],
-        "simulation_mode": HEALTH_DATA["simulation_mode"],
-        "vault_address": HEALTH_DATA["vault_address"],
-        "hot_wallet_address": HEALTH_DATA["hot_wallet_address"],
-        "cold_wallet_address": HEALTH_DATA["cold_wallet_address"]
-    }
+    with health_lock:
+        # Si plus de 3 erreurs consécutives sans succès, on considère le bot comme en mauvaise santé
+        is_healthy = HEALTH_DATA["errors_since_success"] <= 3
+        status_code = 200 if is_healthy else 500
+        
+        response_data = {
+            "status": HEALTH_DATA["status"],
+            "rpc_connected": HEALTH_DATA["rpc_connected"],
+            "last_block_analyzed": HEALTH_DATA["last_block_analyzed"],
+            "last_check_time_utc": time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(HEALTH_DATA["last_check_timestamp"])) if HEALTH_DATA["last_check_timestamp"] else None,
+            "errors_since_success": HEALTH_DATA["errors_since_success"],
+            "last_decision": HEALTH_DATA["last_decision"],
+            "simulation_mode": HEALTH_DATA["simulation_mode"],
+            "vault_address": HEALTH_DATA["vault_address"],
+            "hot_wallet_address": HEALTH_DATA["hot_wallet_address"],
+            "cold_wallet_address": HEALTH_DATA["cold_wallet_address"]
+        }
     
     return jsonify(response_data), status_code
 
 @app.route("/api/status", methods=["GET"])
+@limiter.limit("30/minute")
+@require_api_key
 def api_status():
     """
     Renvoie un état étendu pour le dashboard (toujours 200 OK pour ne pas casser le UI).
     """
-    return jsonify({
-        "status": HEALTH_DATA["status"],
-        "rpc_connected": HEALTH_DATA["rpc_connected"],
-        "last_block_analyzed": HEALTH_DATA["last_block_analyzed"],
-        "last_check_timestamp": HEALTH_DATA["last_check_timestamp"],
-        "last_check_time_utc": time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(HEALTH_DATA["last_check_timestamp"])) if HEALTH_DATA["last_check_timestamp"] else None,
-        "errors_since_success": HEALTH_DATA["errors_since_success"],
-        "last_decision": HEALTH_DATA["last_decision"],
-        "simulation_mode": HEALTH_DATA["simulation_mode"],
-        "vault_address": HEALTH_DATA["vault_address"],
-        "hot_wallet_address": HEALTH_DATA["hot_wallet_address"],
-        "cold_wallet_address": HEALTH_DATA["cold_wallet_address"],
-        "simulated_depeg_active": len(defi_vault_trader.MOCK_PRICES) > 0,
-        "simulated_depeg_price": list(defi_vault_trader.MOCK_PRICES.values())[0] if defi_vault_trader.MOCK_PRICES else None
-    })
+    with health_lock:
+        data = {
+            "status": HEALTH_DATA["status"],
+            "rpc_connected": HEALTH_DATA["rpc_connected"],
+            "last_block_analyzed": HEALTH_DATA["last_block_analyzed"],
+            "last_check_timestamp": HEALTH_DATA["last_check_timestamp"],
+            "last_check_time_utc": time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(HEALTH_DATA["last_check_timestamp"])) if HEALTH_DATA["last_check_timestamp"] else None,
+            "errors_since_success": HEALTH_DATA["errors_since_success"],
+            "last_decision": HEALTH_DATA["last_decision"],
+            "simulation_mode": HEALTH_DATA["simulation_mode"],
+            "vault_address": HEALTH_DATA["vault_address"],
+            "hot_wallet_address": HEALTH_DATA["hot_wallet_address"],
+            "cold_wallet_address": HEALTH_DATA["cold_wallet_address"],
+            "simulated_depeg_active": len(defi_vault_trader.MOCK_PRICES) > 0,
+            "simulated_depeg_price": list(defi_vault_trader.MOCK_PRICES.values())[0] if defi_vault_trader.MOCK_PRICES else None
+        }
+    return jsonify(data)
 
 @app.route("/api/logs", methods=["GET"])
+@limiter.limit("10/minute")
+@require_api_key
 def api_logs():
     """
     Renvoie les dernières lignes du log de production du bot.
@@ -123,6 +169,8 @@ def api_logs():
         return jsonify([f"Error reading logs: {e}"]), 500
 
 @app.route("/api/trigger-check", methods=["POST"])
+@limiter.limit("5/minute")
+@require_api_key
 def api_trigger_check():
     """
     Déclenche immédiatement un cycle de vérification de peg.
@@ -131,10 +179,20 @@ def api_trigger_check():
     return jsonify({"status": "triggered"})
 
 @app.route("/api/simulate-depeg", methods=["POST"])
+@limiter.limit("5/minute")
+@require_api_key
 def api_simulate_depeg():
     """
     Active ou désactive la simulation de depeg en injectant des prix mockés.
+    Bloqué en mode production (SIMULATION_MODE=false) pour protéger les fonds.
     """
+    # Sécurité : blocage en mode production
+    with health_lock:
+        simulation_mode = HEALTH_DATA["simulation_mode"]
+    
+    if not simulation_mode:
+        return jsonify({"error": "Simulation depeg is disabled in production mode. Set SIMULATION_MODE=true to enable."}), 403
+    
     data = request.get_json() or {}
     enabled = data.get("enabled", False)
     price = data.get("price")
@@ -161,6 +219,7 @@ def api_simulate_depeg():
     })
 
 @app.route("/api/vaults", methods=["GET"])
+@limiter.limit("10/minute")
 def api_vaults():
     """
     Recherche, filtre et classe les vaults Beefy Finance via defi_vault_finder.
@@ -179,6 +238,7 @@ def api_vaults():
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/calculator", methods=["POST"])
+@limiter.limit("30/minute")
 def api_calculator():
     """
     Exécute le calculateur de break-even.
@@ -263,16 +323,22 @@ def main():
     check_interval = int(os.getenv("CHECK_INTERVAL", 60))
     circuit_breaker_sleep = int(os.getenv("CIRCUIT_BREAKER_SLEEP", 300)) # 5 minutes par défaut
     
-    HEALTH_DATA["simulation_mode"] = simulation_mode
-    HEALTH_DATA["vault_address"] = vault_address
-    HEALTH_DATA["hot_wallet_address"] = hot_wallet
-    HEALTH_DATA["cold_wallet_address"] = cold_wallet
+    with health_lock:
+        HEALTH_DATA["simulation_mode"] = simulation_mode
+        HEALTH_DATA["vault_address"] = vault_address
+        HEALTH_DATA["hot_wallet_address"] = hot_wallet
+        HEALTH_DATA["cold_wallet_address"] = cold_wallet
     
     logging.info("=== INITIALISATION DU BOT DEFI ===")
     logging.info(f"Mode Simulation : {simulation_mode}")
     logging.info(f"Vault de destination : {vault_address}")
     logging.info(f"Hot Wallet (Bot) : {hot_wallet}")
     logging.info(f"Cold Wallet (Safe/Ledger) : {cold_wallet or 'Non configuré (Retraits directs activés)'}")
+    
+    if ADMIN_API_KEY:
+        logging.info("[SECURITE] Authentification API key activée sur les endpoints sensibles.")
+    else:
+        logging.warning("[SECURITE] ADMIN_API_KEY non configurée. Les endpoints sensibles sont ouverts.")
     
     # 1. OpSec : Blocage immédiat si clé absente hors simulation
     if not private_key and not simulation_mode:
@@ -304,7 +370,8 @@ def main():
         }
     )
     
-    HEALTH_DATA["status"] = "running"
+    with health_lock:
+        HEALTH_DATA["status"] = "running"
     
     # 4. Boucle infinie d'exécution
     while True:
@@ -316,13 +383,17 @@ def main():
             w3 = rpc_manager.get_w3()
             
             if w3:
-                HEALTH_DATA["rpc_connected"] = True
+                with health_lock:
+                    HEALTH_DATA["rpc_connected"] = True
                 try:
-                    HEALTH_DATA["last_block_analyzed"] = w3.eth.block_number
+                    block_number = w3.eth.block_number
+                    with health_lock:
+                        HEALTH_DATA["last_block_analyzed"] = block_number
                 except Exception as block_err:
                     logging.warning(f"Impossible d'interroger le numéro du dernier bloc : {block_err}")
             else:
-                HEALTH_DATA["rpc_connected"] = False
+                with health_lock:
+                    HEALTH_DATA["rpc_connected"] = False
                 if not simulation_mode:
                     raise ConnectionError("Aucun RPC Web3 n'est connecté.")
             
@@ -348,11 +419,12 @@ def main():
             logging.info(f"Vérification terminée. Décision : {decision}")
             
             # Mise à jour des métriques de succès
-            HEALTH_DATA["last_check_status"] = "success"
-            HEALTH_DATA["last_check_timestamp"] = time.time()
-            HEALTH_DATA["errors_since_success"] = 0
-            HEALTH_DATA["last_decision"] = decision
-            HEALTH_DATA["status"] = "running"
+            with health_lock:
+                HEALTH_DATA["last_check_status"] = "success"
+                HEALTH_DATA["last_check_timestamp"] = time.time()
+                HEALTH_DATA["errors_since_success"] = 0
+                HEALTH_DATA["last_decision"] = decision
+                HEALTH_DATA["status"] = "running"
             
             # Alerte en cas d'action majeure (retrait)
             if decision == "WITHDRAWN":
@@ -373,22 +445,26 @@ def main():
             
         except Exception as e:
             # Gestion d'erreurs (Panne totale RPC, etc.) -> Activation du Circuit Breaker
-            HEALTH_DATA["errors_since_success"] += 1
-            HEALTH_DATA["last_check_status"] = "error"
-            HEALTH_DATA["last_check_timestamp"] = time.time()
-            HEALTH_DATA["status"] = "circuit_breaker_active"
+            with health_lock:
+                HEALTH_DATA["errors_since_success"] += 1
+                HEALTH_DATA["last_check_status"] = "error"
+                HEALTH_DATA["last_check_timestamp"] = time.time()
+                HEALTH_DATA["status"] = "circuit_breaker_active"
             
             err_msg = f"Erreur critique lors de la boucle principale du bot : {e}"
             logging.error(err_msg, exc_info=True)
             
             # Envoyer une alerte de panne
+            with health_lock:
+                errors_count = HEALTH_DATA["errors_since_success"]
+            
             send_alert(
                 title="🚨 Alerte Panne / Erreur Bot DeFi",
                 message=f"Le bot a rencontré une exception. Le circuit breaker s'active (mise en pause de sécurité).",
                 status="critical",
                 details={
                     "Erreur": str(e),
-                    "Erreurs consécutives": HEALTH_DATA["errors_since_success"],
+                    "Erreurs consécutives": errors_count,
                     "Pause de sécurité": f"{circuit_breaker_sleep}s"
                 }
             )

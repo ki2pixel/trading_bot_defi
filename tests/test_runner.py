@@ -3,27 +3,25 @@ from unittest.mock import MagicMock, patch
 import os
 import sys
 
-# Ajuster le chemin d'importation pour accéder aux modules du projet
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-from runner import HEALTH_DATA, app
+from runner import HEALTH_DATA, app, health_lock
 import runner
 
 @pytest.fixture(autouse=True)
 def reset_health_data():
-    HEALTH_DATA.update({
-        "status": "starting",
-        "rpc_connected": False,
-        "last_block_analyzed": None,
-        "last_check_timestamp": 0,
-        "last_check_status": None,
-        "errors_since_success": 0,
-        "last_decision": None,
-        "simulation_mode": False,
-        "vault_address": None,
-        "hot_wallet_address": None,
-        "cold_wallet_address": None,
-    })
+    with health_lock:
+        HEALTH_DATA.update({
+            "status": "starting",
+            "rpc_connected": False,
+            "last_block_analyzed": None,
+            "last_check_timestamp": 0,
+            "last_check_status": None,
+            "errors_since_success": 0,
+            "last_decision": None,
+            "simulation_mode": False,
+            "vault_address": None,
+            "hot_wallet_address": None,
+            "cold_wallet_address": None,
+        })
 
 def test_health_check_endpoint():
     """
@@ -34,13 +32,14 @@ def test_health_check_endpoint():
     client = app.test_client()
     
     # Configurer des métriques fictives saines
-    HEALTH_DATA["status"] = "running"
-    HEALTH_DATA["rpc_connected"] = True
-    HEALTH_DATA["last_block_analyzed"] = 8453000
-    HEALTH_DATA["errors_since_success"] = 0
-    HEALTH_DATA["simulation_mode"] = True
-    HEALTH_DATA["last_decision"] = "HOLD"
-    HEALTH_DATA["cold_wallet_address"] = "0xColdWalletAddress"
+    with health_lock:
+        HEALTH_DATA["status"] = "running"
+        HEALTH_DATA["rpc_connected"] = True
+        HEALTH_DATA["last_block_analyzed"] = 8453000
+        HEALTH_DATA["errors_since_success"] = 0
+        HEALTH_DATA["simulation_mode"] = True
+        HEALTH_DATA["last_decision"] = "HOLD"
+        HEALTH_DATA["cold_wallet_address"] = "0xColdWalletAddress"
     
     response = client.get("/health")
     assert response.status_code == 200
@@ -63,7 +62,8 @@ def test_health_check_endpoint_unhealthy():
     client = app.test_client()
     
     # Forcer un état en erreur critique
-    HEALTH_DATA["errors_since_success"] = 4
+    with health_lock:
+        HEALTH_DATA["errors_since_success"] = 4
     
     response = client.get("/health")
     assert response.status_code == 500
@@ -92,9 +92,10 @@ def test_runner_main_loop_circuit_breaker(mock_rpc_mgr_class, mock_check_strateg
         call_count += 1
         if call_count == 1:
             # Vérifier l'état du circuit breaker avant d'interrompre
-            assert HEALTH_DATA["errors_since_success"] == 1
-            assert HEALTH_DATA["status"] == "circuit_breaker_active"
-            assert HEALTH_DATA["last_check_status"] == "error"
+            with health_lock:
+                assert HEALTH_DATA["errors_since_success"] == 1
+                assert HEALTH_DATA["status"] == "circuit_breaker_active"
+                assert HEALTH_DATA["last_check_status"] == "error"
             # Lever une KeyboardInterrupt pour sortir de la boucle infinie de main()
             raise KeyboardInterrupt()
             
@@ -128,3 +129,101 @@ def test_runner_opsec_failure(mock_send_alert, mock_setup_logging):
     # Vérifier qu'une alerte critique a été transmise avant le crash
     mock_send_alert.assert_called_once()
     assert "critical" in mock_send_alert.call_args[1]["status"]
+
+
+# --- Tests d'authentification API ---
+
+class TestApiAuthentication:
+    """Tests pour la protection par API key des endpoints sensibles."""
+
+    @pytest.fixture(autouse=True)
+    def setup_client(self):
+        app.config["TESTING"] = True
+        self.client = app.test_client()
+
+    @patch.object(runner, "ADMIN_API_KEY", "test-secret-key-123")
+    def test_protected_endpoints_return_401_without_key(self):
+        """Les endpoints protégés retournent 401 sans API key."""
+        protected_routes = [
+            ("GET", "/api/status"),
+            ("GET", "/api/logs"),
+            ("POST", "/api/trigger-check"),
+            ("POST", "/api/simulate-depeg"),
+        ]
+        
+        for method, route in protected_routes:
+            if method == "GET":
+                response = self.client.get(route)
+            else:
+                response = self.client.post(route, json={})
+            
+            assert response.status_code == 401, f"{method} {route} should return 401, got {response.status_code}"
+
+    @patch.object(runner, "ADMIN_API_KEY", "test-secret-key-123")
+    def test_protected_endpoints_work_with_bearer_token(self):
+        """Les endpoints protégés fonctionnent avec un Bearer token valide."""
+        headers = {"Authorization": "Bearer test-secret-key-123"}
+        
+        response = self.client.get("/api/status", headers=headers)
+        assert response.status_code == 200
+
+        response = self.client.get("/api/logs", headers=headers)
+        assert response.status_code == 200
+
+    @patch.object(runner, "ADMIN_API_KEY", "test-secret-key-123")
+    def test_protected_endpoints_work_with_query_param(self):
+        """Les endpoints protégés fonctionnent avec le query param api_key."""
+        response = self.client.get("/api/status?api_key=test-secret-key-123")
+        assert response.status_code == 200
+
+    @patch.object(runner, "ADMIN_API_KEY", "test-secret-key-123")
+    def test_wrong_api_key_returns_401(self):
+        """Une clé API incorrecte retourne 401."""
+        headers = {"Authorization": "Bearer wrong-key"}
+        response = self.client.get("/api/status", headers=headers)
+        assert response.status_code == 401
+
+    @patch.object(runner, "ADMIN_API_KEY", "")
+    def test_no_api_key_configured_allows_access(self):
+        """Sans ADMIN_API_KEY configurée, les endpoints sont ouverts (rétrocompatibilité)."""
+        response = self.client.get("/api/status")
+        assert response.status_code == 200
+
+    def test_public_endpoints_always_accessible(self):
+        """Les endpoints publics sont toujours accessibles sans API key."""
+        response = self.client.get("/health")
+        assert response.status_code in (200, 500)  # Dépend de l'état de HEALTH_DATA
+
+    @patch.object(runner, "ADMIN_API_KEY", "test-secret-key-123")
+    def test_simulate_depeg_blocked_in_production(self):
+        """L'endpoint simulate-depeg retourne 403 en mode production."""
+        headers = {"Authorization": "Bearer test-secret-key-123"}
+        
+        with health_lock:
+            HEALTH_DATA["simulation_mode"] = False
+        
+        response = self.client.post(
+            "/api/simulate-depeg",
+            json={"enabled": True, "price": 0.95},
+            headers=headers
+        )
+        assert response.status_code == 403
+        data = response.get_json()
+        assert "disabled in production" in data["error"]
+
+    @patch.object(runner, "ADMIN_API_KEY", "test-secret-key-123")
+    def test_simulate_depeg_allowed_in_simulation_mode(self):
+        """L'endpoint simulate-depeg fonctionne en mode simulation."""
+        headers = {"Authorization": "Bearer test-secret-key-123"}
+        
+        with health_lock:
+            HEALTH_DATA["simulation_mode"] = True
+        
+        response = self.client.post(
+            "/api/simulate-depeg",
+            json={"enabled": True, "price": 0.95},
+            headers=headers
+        )
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["simulated_depeg_active"] is True

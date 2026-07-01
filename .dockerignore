@@ -1,0 +1,37 @@
+# Fichiers d'environnement et secrets
+.env
+.env.*
+!.env.example
+
+# Git
+.git/
+.github/
+
+# Caches Python
+.pytest_cache/
+__pycache__/
+*.pyc
+*.pyo
+*.py[cod]
+*$py.class
+
+# Environnement virtuel
+.venv/
+venv/
+ENV/
+env/
+
+# Tests et documentation (non requis en production)
+tests/
+docs/
+
+# Logs locaux (générés au runtime)
+logs/
+
+# Documentation markdown (sauf README)
+*.md
+!README.md
+
+# IDE
+.vscode/
+.idea/
