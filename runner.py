@@ -21,7 +21,8 @@ load_dotenv()
 from defi_vault_trader import (
     RPCManager,
     check_depeg_and_execute_strategy,
-    execute_with_retry
+    execute_with_retry,
+    OpSecMaskingFormatter
 )
 from alerts import send_alert
 
@@ -90,8 +91,8 @@ def setup_logging():
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     
-    # Format standardisé des logs de production
-    formatter = logging.Formatter(
+    # Format standardisé des logs de production avec masquage OpSec
+    formatter = OpSecMaskingFormatter(
         "%(asctime)s [%(levelname)s] (%(name)s) %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     )

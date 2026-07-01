@@ -23,15 +23,101 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configuration du module de logs
+class OpSecMaskingFormatter(logging.Formatter):
+    """
+    Formatter qui masque automatiquement les informations sensibles
+    (clés privées, tokens d'API, adresses EVM complètes) dans les logs.
+    """
+    def __init__(self, fmt=None, datefmt=None, style='%'):
+        super().__init__(fmt, datefmt, style)
+        self.patterns = []
+        self.rebuild_patterns()
+
+    def rebuild_patterns(self):
+        self.patterns = []
+        import os
+        
+        # 1. Clé privée
+        pk = os.getenv("HOT_WALLET_PRIVATE_KEY")
+        if pk and len(pk.strip()) > 8:
+            self.patterns.append((pk.strip(), "[MASKED_PRIVATE_KEY]"))
+            
+        # 2. Discord Webhook URL
+        discord = os.getenv("DISCORD_WEBHOOK_URL")
+        if discord and len(discord.strip()) > 8:
+            self.patterns.append((discord.strip(), "[MASKED_DISCORD_WEBHOOK]"))
+            
+        # 3. Telegram Bot Token et Chat ID
+        tg_token = os.getenv("TELEGRAM_BOT_TOKEN")
+        if tg_token and len(tg_token.strip()) > 8:
+            self.patterns.append((tg_token.strip(), "[MASKED_TELEGRAM_TOKEN]"))
+            
+        tg_chat = os.getenv("TELEGRAM_CHAT_ID")
+        if tg_chat and len(tg_chat.strip()) > 2:
+            self.patterns.append((tg_chat.strip(), "[MASKED_TELEGRAM_CHAT_ID]"))
+            
+        # 4. RPC URLs
+        rpc_str = (os.getenv("L2_RPC_URLS") or "") + "," + (os.getenv("L2_RPC_URL") or "")
+        urls = [u.strip() for u in rpc_str.split(",") if u.strip()]
+        for url in urls:
+            if len(url) > 10:
+                masked = self._mask_url(url)
+                self.patterns.append((url, masked))
+                
+        # 5. Adresses EVM (Vault, Portefeuilles)
+        addr_vars = ["DEFI_VAULT_ADDRESS", "USER_WALLET_ADDRESS", "HOT_WALLET_ADDRESS", "COLD_WALLET_ADDRESS"]
+        for var in addr_vars:
+            addr = os.getenv(var)
+            if addr and addr.strip().startswith("0x") and len(addr.strip()) == 42:
+                clean_addr = addr.strip()
+                masked = f"{clean_addr[:6]}...{clean_addr[-4:]}"
+                variants = {clean_addr, clean_addr.lower(), clean_addr.upper()}
+                try:
+                    from web3 import Web3
+                    variants.add(Web3.to_checksum_address(clean_addr))
+                except Exception:
+                    pass
+                for variant in variants:
+                    self.patterns.append((variant, masked))
+                    
+        # Trier par longueur décroissante pour éviter des remplacements partiels conflictuels
+        self.patterns = sorted(list(set(self.patterns)), key=lambda x: len(x[0]), reverse=True)
+
+    def _mask_url(self, url):
+        from urllib.parse import urlparse
+        try:
+            parsed = urlparse(url)
+            if parsed.scheme and parsed.netloc:
+                netloc = parsed.netloc
+                if "@" in netloc:
+                    _, host = netloc.split("@", 1)
+                    netloc = host
+                return f"{parsed.scheme}://{netloc}/***"
+        except Exception:
+            pass
+        if len(url) > 15:
+            return f"{url[:10]}...{url[-5:]}"
+        return "***"
+
+    def format(self, record):
+        formatted = super().format(record)
+        for sensitive, replacement in self.patterns:
+            if sensitive and len(sensitive) > 4:
+                formatted = formatted.replace(sensitive, replacement)
+        return formatted
+
 logger = logging.getLogger("defi_vault_trader")
 
 # Configuration de base si lancée en CLI directement
 if not logging.getLogger().handlers:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(OpSecMaskingFormatter(
+        fmt="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
-    )
+    ))
+    logging.getLogger().addHandler(handler)
+    logging.getLogger().setLevel(logging.INFO)
+
 
 def print(*args, file=None, **kwargs):
     """

@@ -175,3 +175,42 @@ def test_hot_cold_wallet_not_approved():
             private_key=None,
             cold_wallet=COLD_ADDR
         )
+
+def test_opsec_masking_formatter():
+    import os
+    import logging
+    from unittest.mock import patch
+    from defi_vault_trader import OpSecMaskingFormatter
+    
+    test_env = {
+        "HOT_WALLET_PRIVATE_KEY": "0xabc123secretprivatekey",
+        "DISCORD_WEBHOOK_URL": "https://discord.com/api/webhooks/999/secrettoken",
+        "TELEGRAM_BOT_TOKEN": "bot12345:tokenxyz",
+        "TELEGRAM_CHAT_ID": "chat9999",
+        "L2_RPC_URLS": "https://base.llamarpc.com/key123,https://rpc.ankr.com/public",
+        "DEFI_VAULT_ADDRESS": "0x83152eE78d8f20Bba134A5FF000D551355Ce3996",
+        "HOT_WALLET_ADDRESS": "0x0000000000000000000000000000000000000001"
+    }
+    
+    with patch.dict(os.environ, test_env):
+        formatter = OpSecMaskingFormatter()
+        formatter.rebuild_patterns()
+        
+        # Test private key masking
+        rec = logging.LogRecord("test", logging.INFO, "path", 1, "Clé privée : 0xabc123secretprivatekey", (), None)
+        assert "[MASKED_PRIVATE_KEY]" in formatter.format(rec)
+        assert "0xabc123secretprivatekey" not in formatter.format(rec)
+        
+        # Test webhook masking
+        rec2 = logging.LogRecord("test", logging.INFO, "path", 1, "Webhook : https://discord.com/api/webhooks/999/secrettoken", (), None)
+        assert "[MASKED_DISCORD_WEBHOOK]" in formatter.format(rec2)
+        
+        # Test EVM address truncation (should support both checksum case and other cases)
+        rec3 = logging.LogRecord("test", logging.INFO, "path", 1, "Vault: 0x83152ee78d8f20bba134a5ff000d551355ce3996", (), None)
+        assert "0x8315...3996" in formatter.format(rec3)
+        assert "0x83152ee78d8" not in formatter.format(rec3)
+        
+        # Test RPC url masking
+        rec4 = logging.LogRecord("test", logging.INFO, "path", 1, "Connecting to https://base.llamarpc.com/key123", (), None)
+        assert "https://base.llamarpc.com/***" in formatter.format(rec4)
+
