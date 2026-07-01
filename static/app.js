@@ -344,7 +344,7 @@ elBtnSearchVaults.addEventListener('click', async () => {
         if (vaults.length === 0) {
             elVaultsTbody.innerHTML = `
                 <tr>
-                    <td colspan="6" class="text-center text-muted">Aucun vault stablecoin actif trouvé avec ces filtres</td>
+                    <td colspan="7" class="text-center text-muted">Aucun vault stablecoin actif trouvé avec ces filtres</td>
                 </tr>
             `;
             return;
@@ -360,6 +360,16 @@ elBtnSearchVaults.addEventListener('click', async () => {
             // APY percentage formatting
             const apyPct = (vault.apy * 100).toFixed(2);
             
+            // Shortened address for display, but keep full address in DOM for copying
+            const shortAddr = vault.vaultAddress ? `${vault.vaultAddress.substring(0, 6)}...${vault.vaultAddress.substring(vault.vaultAddress.length - 4)}` : 'N/A';
+            const addressHtml = vault.vaultAddress ? `
+                <div style="display:inline-flex;align-items:center;gap:6px;font-family:var(--font-mono);font-size:0.75rem;">
+                    <span title="${vault.vaultAddress}">${shortAddr}</span>
+                    <span id="addr-${vault.id}" class="hidden">${vault.vaultAddress}</span>
+                    <button class="btn-copy" onclick="copyText('addr-${vault.id}')" title="Copier l'adresse du vault"><i data-lucide="copy" style="width:12px;height:12px;"></i></button>
+                </div>
+            ` : 'N/A';
+            
             // Assets string list
             const assetsList = vault.assets.join(', ');
             
@@ -368,6 +378,7 @@ elBtnSearchVaults.addEventListener('click', async () => {
                 <td><strong>${escapeHtml(vault.name)}</strong></td>
                 <td><span class="highlight-box">${escapeHtml(vault.platform)}</span></td>
                 <td class="text-success" style="font-weight:600;">${apyPct}%</td>
+                <td>${addressHtml}</td>
                 <td>${escapeHtml(assetsList)}</td>
                 <td>
                     <button class="btn btn-secondary btn-icon-text" onclick="loadToCalculator(${vault.apy * 100})">
@@ -385,7 +396,7 @@ elBtnSearchVaults.addEventListener('click', async () => {
         showToast('Impossible de récupérer les vaults Beefy API.', 'error');
         elVaultsTbody.innerHTML = `
             <tr>
-                <td colspan="6" class="text-center text-danger">Erreur : ${error.message}</td>
+                <td colspan="7" class="text-center text-danger">Erreur : ${error.message}</td>
             </tr>
         `;
     } finally {
