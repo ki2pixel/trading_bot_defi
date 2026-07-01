@@ -42,6 +42,7 @@ HEALTH_DATA = {
     "simulation_mode": False,
     "vault_address": None,
     "hot_wallet_address": None,
+    "cold_wallet_address": None,
 }
 
 # Configuration du serveur de Health Check Flask et Dashboard statique
@@ -77,7 +78,8 @@ def health_check():
         "last_decision": HEALTH_DATA["last_decision"],
         "simulation_mode": HEALTH_DATA["simulation_mode"],
         "vault_address": HEALTH_DATA["vault_address"],
-        "hot_wallet_address": HEALTH_DATA["hot_wallet_address"]
+        "hot_wallet_address": HEALTH_DATA["hot_wallet_address"],
+        "cold_wallet_address": HEALTH_DATA["cold_wallet_address"]
     }
     
     return jsonify(response_data), status_code
@@ -98,6 +100,7 @@ def api_status():
         "simulation_mode": HEALTH_DATA["simulation_mode"],
         "vault_address": HEALTH_DATA["vault_address"],
         "hot_wallet_address": HEALTH_DATA["hot_wallet_address"],
+        "cold_wallet_address": HEALTH_DATA["cold_wallet_address"],
         "simulated_depeg_active": len(defi_vault_trader.MOCK_PRICES) > 0,
         "simulated_depeg_price": list(defi_vault_trader.MOCK_PRICES.values())[0] if defi_vault_trader.MOCK_PRICES else None
     })
@@ -263,6 +266,7 @@ def main():
     HEALTH_DATA["simulation_mode"] = simulation_mode
     HEALTH_DATA["vault_address"] = vault_address
     HEALTH_DATA["hot_wallet_address"] = hot_wallet
+    HEALTH_DATA["cold_wallet_address"] = cold_wallet
     
     logging.info("=== INITIALISATION DU BOT DEFI ===")
     logging.info(f"Mode Simulation : {simulation_mode}")

@@ -22,6 +22,7 @@ def reset_health_data():
         "simulation_mode": False,
         "vault_address": None,
         "hot_wallet_address": None,
+        "cold_wallet_address": None,
     })
 
 def test_health_check_endpoint():
@@ -39,6 +40,7 @@ def test_health_check_endpoint():
     HEALTH_DATA["errors_since_success"] = 0
     HEALTH_DATA["simulation_mode"] = True
     HEALTH_DATA["last_decision"] = "HOLD"
+    HEALTH_DATA["cold_wallet_address"] = "0xColdWalletAddress"
     
     response = client.get("/health")
     assert response.status_code == 200
@@ -50,6 +52,7 @@ def test_health_check_endpoint():
     assert data["errors_since_success"] == 0
     assert data["simulation_mode"] is True
     assert data["last_decision"] == "HOLD"
+    assert data["cold_wallet_address"] == "0xColdWalletAddress"
 
 def test_health_check_endpoint_unhealthy():
     """
