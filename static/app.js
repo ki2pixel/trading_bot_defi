@@ -15,6 +15,10 @@ const elHotWalletAddr = document.getElementById('hot-wallet-addr');
 const elColdWalletAddr = document.getElementById('cold-wallet-addr');
 const elVaultAddr = document.getElementById('vault-addr');
 
+const elApiKeyInput = document.getElementById('api-key-input');
+const elApiKeyWrapper = document.getElementById('api-key-wrapper');
+const elBtnToggleKeyVisibility = document.getElementById('btn-toggle-key-visibility');
+
 const elBtnTriggerCheck = document.getElementById('btn-trigger-check');
 const elSimPriceRange = document.getElementById('sim-price-range');
 const elSimPriceVal = document.getElementById('sim-price-val');
@@ -44,41 +48,106 @@ const elToast = document.getElementById('toast');
 const elToastIcon = document.getElementById('toast-icon');
 const elToastMessage = document.getElementById('toast-message');
 
+// API KEY MANAGEMENT
+// Load saved API key
+if (localStorage.getItem('defi_bot_api_key')) {
+    elApiKeyInput.value = localStorage.getItem('defi_bot_api_key');
+}
+
+// Save API key on change
+elApiKeyInput.addEventListener('input', (e) => {
+    const key = e.target.value.trim();
+    localStorage.setItem('defi_bot_api_key', key);
+    if (!key) {
+        elApiKeyWrapper.className = 'api-key-input-wrapper';
+    }
+});
+
+// Toggle key visibility
+elBtnToggleKeyVisibility.addEventListener('click', () => {
+    const isPassword = elApiKeyInput.type === 'password';
+    elApiKeyInput.type = isPassword ? 'text' : 'password';
+    elBtnToggleKeyVisibility.innerHTML = isPassword ? '<i data-lucide="eye-off"></i>' : '<i data-lucide="eye"></i>';
+    lucide.createIcons();
+});
+
+// Auth fetch wrapper
+async function fetchWithAuth(url, options = {}) {
+    const apiKey = localStorage.getItem('defi_bot_api_key') || '';
+    if (!options.headers) {
+        options.headers = {};
+    }
+    if (apiKey) {
+        options.headers['Authorization'] = `Bearer ${apiKey}`;
+    }
+    const response = await fetch(url, options);
+    
+    if (response.status === 401) {
+        elApiKeyWrapper.classList.add('api-key-invalid');
+        elApiKeyWrapper.classList.remove('api-key-valid');
+    } else if (response.status >= 200 && response.status < 300) {
+        if (apiKey) {
+            elApiKeyWrapper.classList.add('api-key-valid');
+            elApiKeyWrapper.classList.remove('api-key-invalid');
+        } else {
+            elApiKeyWrapper.classList.remove('api-key-valid', 'api-key-invalid');
+        }
+    }
+    return response;
+}
+
 // TOAST SYSTEM
 function showToast(message, type = 'info') {
     elToastMessage.textContent = message;
-    
-    // Reset classes
     elToast.className = 'toast';
     elToast.classList.add(`toast-${type}`);
     
-    // Set icon
     let iconName = 'info';
     if (type === 'success') iconName = 'check-circle-2';
     if (type === 'error') iconName = 'x-circle';
     
     elToastIcon.setAttribute('data-lucide', iconName);
     lucide.createIcons();
-    
-    // Show toast
     elToast.classList.remove('hidden');
     
-    // Hide toast after 3.5s
     setTimeout(() => {
         elToast.classList.add('hidden');
     }, 3500);
 }
 
-// COPY TO CLIPBOARD
+// COPY TO CLIPBOARD WITH FALLBACK
 window.copyText = function(elementId) {
     const text = document.getElementById(elementId).textContent;
-    navigator.clipboard.writeText(text).then(() => {
-        showToast('Adresse copiée dans le presse-papiers !', 'success');
-    }).catch(err => {
-        showToast('Échec de la copie', 'error');
-        console.error('Error copying text: ', err);
-    });
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(() => {
+            showToast('Adresse copiée dans le presse-papiers !', 'success');
+        }).catch(err => {
+            fallbackCopyText(text);
+        });
+    } else {
+        fallbackCopyText(text);
+    }
 };
+
+function fallbackCopyText(text) {
+    const textArea = document.createElement("textarea");
+    textArea.value = text;
+    textArea.style.position = "fixed";
+    document.body.appendChild(textArea);
+    textArea.focus();
+    textArea.select();
+    try {
+        const successful = document.execCommand('copy');
+        if (successful) {
+            showToast('Adresse copiée !', 'success');
+        } else {
+            showToast('Échec de la copie', 'error');
+        }
+    } catch (err) {
+        showToast('Échec de la copie', 'error');
+    }
+    document.body.removeChild(textArea);
+}
 
 // FORMAT DATE
 function formatTimestamp(epochSec) {
@@ -90,7 +159,7 @@ function formatTimestamp(epochSec) {
 // 1. STATE & INFO POLLING
 async function pollStatus() {
     try {
-        const response = await fetch('/api/status');
+        const response = await fetchWithAuth('/api/status');
         if (!response.ok) throw new Error('API status failure');
         
         const data = await response.json();
@@ -160,6 +229,11 @@ async function pollStatus() {
         lucide.createIcons();
     } catch (error) {
         console.error('Error polling bot status:', error);
+        elBotStatusIndicator.className = 'status-badge status-circuit-breaker';
+        elBotStatusText.textContent = 'Serveur Hors-ligne';
+        elRpcStatus.className = 'value text-danger';
+        elRpcStatus.innerHTML = '<i data-lucide="wifi-off"></i> Déconnecté';
+        lucide.createIcons();
     }
 }
 
@@ -188,7 +262,7 @@ function shouldShowLogLine(line, filter) {
 
 async function pollLogs() {
     try {
-        const response = await fetch('/api/logs?limit=150');
+        const response = await fetchWithAuth('/api/logs?limit=150');
         if (!response.ok) throw new Error('API logs failure');
         
         const lines = await response.json();
@@ -205,8 +279,6 @@ async function pollLogs() {
 
 function renderLogs(lines) {
     const activeFilter = elLogFilter.value;
-    
-    // Clear screen first (keep system startup lines if empty)
     elTerminalScreen.innerHTML = '';
     
     if (lines.length === 0) {
@@ -214,13 +286,57 @@ function renderLogs(lines) {
         return;
     }
     
-    let renderedCount = 0;
+    // Regrouper les lignes logiques
+    const logEntries = [];
+    let currentEntry = null;
+    const timestampRegex = /^\d{4}-\d{2}-\d{2}/;
+    
     lines.forEach(line => {
-        if (shouldShowLogLine(line, activeFilter)) {
-            const elLine = document.createElement('div');
-            elLine.className = 'log-line ' + getLogLevelClass(line);
-            elLine.textContent = line;
-            elTerminalScreen.appendChild(elLine);
+        if (timestampRegex.test(line)) {
+            if (currentEntry) {
+                logEntries.push(currentEntry);
+            }
+            currentEntry = {
+                header: line,
+                sublines: [],
+                levelClass: getLogLevelClass(line)
+            };
+        } else {
+            if (currentEntry) {
+                currentEntry.sublines.push(line);
+            } else {
+                logEntries.push({
+                    header: line,
+                    sublines: [],
+                    levelClass: 'log-system'
+                });
+            }
+        }
+    });
+    
+    if (currentEntry) {
+        logEntries.push(currentEntry);
+    }
+    
+    let renderedCount = 0;
+    logEntries.forEach(entry => {
+        if (shouldShowLogLine(entry.header, activeFilter)) {
+            const elBlock = document.createElement('div');
+            elBlock.className = 'log-entry-block';
+            
+            const elHeader = document.createElement('div');
+            elHeader.className = 'log-line ' + entry.levelClass;
+            elHeader.textContent = entry.header;
+            elBlock.appendChild(elHeader);
+            
+            entry.sublines.forEach(sub => {
+                const elSub = document.createElement('div');
+                elSub.className = 'log-line-sub';
+                elSub.textContent = sub;
+                elBlock.appendChild(elSub);
+            });
+            
+            elTerminalScreen.appendChild(elBlock);
             renderedCount++;
         }
     });
@@ -242,7 +358,7 @@ elBtnTriggerCheck.addEventListener('click', async () => {
     elBtnTriggerCheck.innerHTML = '<i class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;margin:0;"></i> Déclenchement...';
     
     try {
-        const response = await fetch('/api/trigger-check', { method: 'POST' });
+        const response = await fetchWithAuth('/api/trigger-check', { method: 'POST' });
         if (response.ok) {
             showToast('Vérification du peg forcée avec succès !', 'success');
             // Wait slightly and fetch status
@@ -270,7 +386,7 @@ elSimPriceRange.addEventListener('input', (e) => {
 elBtnEnableSim.addEventListener('click', async () => {
     const price = parseFloat(elSimPriceRange.value);
     try {
-        const response = await fetch('/api/simulate-depeg', {
+        const response = await fetchWithAuth('/api/simulate-depeg', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ enabled: true, price: price })
@@ -290,7 +406,7 @@ elBtnEnableSim.addEventListener('click', async () => {
 
 elBtnDisableSim.addEventListener('click', async () => {
     try {
-        const response = await fetch('/api/simulate-depeg', {
+        const response = await fetchWithAuth('/api/simulate-depeg', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ enabled: false })
@@ -336,7 +452,7 @@ elBtnSearchVaults.addEventListener('click', async () => {
     const url = `/api/vaults?${queryParams.join('&')}`;
     
     try {
-        const response = await fetch(url);
+        const response = await fetchWithAuth(url);
         if (!response.ok) throw new Error('API vaults fetch error');
         
         const vaults = await response.json();
@@ -438,7 +554,7 @@ elCalcForm.addEventListener('submit', async (e) => {
     const slippage = parseFloat(document.getElementById('calc-slippage').value);
     
     try {
-        const response = await fetch('/api/calculator', {
+        const response = await fetchWithAuth('/api/calculator', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({

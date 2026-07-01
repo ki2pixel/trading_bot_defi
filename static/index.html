@@ -24,14 +24,23 @@
                     <p>Protection Anti-Depeg & Calculateur de Break-Even</p>
                 </div>
             </div>
-            <div class="header-status">
-                <div id="bot-status-indicator" class="status-badge status-starting">
-                    <span class="status-dot animate-pulse"></span>
-                    <span id="bot-status-text">Initialisation...</span>
+            <div class="header-controls">
+                <div class="api-key-group">
+                    <div id="api-key-wrapper" class="api-key-input-wrapper">
+                        <i data-lucide="key" class="key-icon"></i>
+                        <input type="password" id="api-key-input" placeholder="Clé API Admin" title="Renseignez la clé API pour administrer le bot">
+                        <button id="btn-toggle-key-visibility" class="btn-icon-only" title="Afficher/Masquer la clé"><i data-lucide="eye"></i></button>
+                    </div>
                 </div>
-                <div id="simulation-mode-indicator" class="status-badge mode-simulation">
-                    <i data-lucide="binary"></i>
-                    <span>Mode Simulation</span>
+                <div class="header-status">
+                    <div id="bot-status-indicator" class="status-badge status-starting">
+                        <span class="status-dot animate-pulse"></span>
+                        <span id="bot-status-text">Initialisation...</span>
+                    </div>
+                    <div id="simulation-mode-indicator" class="status-badge mode-simulation">
+                        <i data-lucide="binary"></i>
+                        <span>Mode Simulation</span>
+                    </div>
                 </div>
             </div>
         </header>
