@@ -27,21 +27,17 @@ def fetch_beefy_data():
     """
     Récupère les informations des vaults et les APY depuis l'API de Beefy Finance.
     """
-    try:
-        print("Fetching vaults from Beefy Finance...")
-        vaults_res = requests.get("https://api.beefy.finance/vaults", timeout=15)
-        vaults_res.raise_for_status()
-        vaults = vaults_res.json()
+    print("Fetching vaults from Beefy Finance...")
+    vaults_res = requests.get("https://api.beefy.finance/vaults", timeout=15)
+    vaults_res.raise_for_status()
+    vaults = vaults_res.json()
 
-        print("Fetching APYs from Beefy Finance...")
-        apy_res = requests.get("https://api.beefy.finance/apy", timeout=15)
-        apy_res.raise_for_status()
-        apys = apy_res.json()
+    print("Fetching APYs from Beefy Finance...")
+    apy_res = requests.get("https://api.beefy.finance/apy", timeout=15)
+    apy_res.raise_for_status()
+    apys = apy_res.json()
 
-        return vaults, apys
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching data from Beefy API: {e}", file=sys.stderr)
-        sys.exit(1)
+    return vaults, apys
 
 def is_stable_vault(vault):
     """
@@ -240,7 +236,11 @@ def main():
     min_apy_decimal = args.min_apy / 100.0
     chains_set = set(c.lower() for c in args.chains)
     
-    vaults, apys = fetch_beefy_data()
+    try:
+        vaults, apys = fetch_beefy_data()
+    except Exception as e:
+        print(f"Error fetching data from Beefy API: {e}", file=sys.stderr)
+        sys.exit(1)
     ranked_vaults = filter_and_rank_vaults(vaults, apys, chains=chains_set, min_apy=min_apy_decimal)
     
     # Logique d'analyse de break-even

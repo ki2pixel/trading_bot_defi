@@ -66,10 +66,10 @@ def test_health_check_endpoint_unhealthy():
     assert response.status_code == 500
 
 @patch("runner.send_alert")
-@patch("time.sleep", return_value=None)
+@patch("runner.trigger_event.wait", return_value=True)
 @patch("runner.check_depeg_and_execute_strategy")
 @patch("runner.RPCManager")
-def test_runner_main_loop_circuit_breaker(mock_rpc_mgr_class, mock_check_strategy, mock_sleep, mock_send_alert):
+def test_runner_main_loop_circuit_breaker(mock_rpc_mgr_class, mock_check_strategy, mock_wait, mock_send_alert):
     """
     Teste que la boucle principale du runner intercepte les exceptions,
     active le circuit breaker (état, compteur d'erreurs), et envoie une alerte.
@@ -82,9 +82,9 @@ def test_runner_main_loop_circuit_breaker(mock_rpc_mgr_class, mock_check_strateg
     # Configurer check_depeg_and_execute_strategy pour lever une exception
     mock_check_strategy.side_effect = Exception("Connexion RPC interrompue")
     
-    # Intercepter le sommeil pour casser la boucle infinie après le premier cycle
+    # Intercepter l'événement d'attente pour casser la boucle infinie après le premier cycle
     call_count = 0
-    def sleep_side_effect(seconds):
+    def wait_side_effect(timeout=None):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
@@ -95,7 +95,7 @@ def test_runner_main_loop_circuit_breaker(mock_rpc_mgr_class, mock_check_strateg
             # Lever une KeyboardInterrupt pour sortir de la boucle infinie de main()
             raise KeyboardInterrupt()
             
-    mock_sleep.side_effect = sleep_side_effect
+    mock_wait.side_effect = wait_side_effect
     
     # Configurer temporairement l'environnement de test en mode simulation
     with patch.dict(os.environ, {"SIMULATION_MODE": "true"}):

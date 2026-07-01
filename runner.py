@@ -12,7 +12,7 @@ import logging
 import logging.handlers
 import threading
 from dotenv import load_dotenv
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 
 # Charger les variables d'environnement
 load_dotenv()
@@ -24,9 +24,13 @@ from defi_vault_trader import (
     execute_with_retry,
     OpSecMaskingFormatter
 )
+import defi_vault_trader
+import defi_vault_finder
 from alerts import send_alert
 
-# État global partagé pour le health check
+# État global partagé pour le health check et événement de réveil
+trigger_event = threading.Event()
+
 HEALTH_DATA = {
     "status": "starting",
     "rpc_connected": False,
@@ -40,12 +44,19 @@ HEALTH_DATA = {
     "hot_wallet_address": None,
 }
 
-# Configuration du serveur de Health Check Flask
-app = Flask("DeFiBotHealthCheck")
+# Configuration du serveur de Health Check Flask et Dashboard statique
+app = Flask("DeFiBotHealthCheck", static_folder="static")
 
 # Désactiver les logs de requêtes Flask par défaut pour ne pas polluer les logs de prod
 log_werkzeug = logging.getLogger('werkzeug')
 log_werkzeug.setLevel(logging.WARNING)
+
+@app.route("/")
+def index():
+    """
+    Sert le tableau de bord frontend statique.
+    """
+    return app.send_static_file("index.html")
 
 @app.route("/health", methods=["GET"])
 def health_check():
@@ -71,16 +82,138 @@ def health_check():
     
     return jsonify(response_data), status_code
 
+@app.route("/api/status", methods=["GET"])
+def api_status():
+    """
+    Renvoie un état étendu pour le dashboard (toujours 200 OK pour ne pas casser le UI).
+    """
+    return jsonify({
+        "status": HEALTH_DATA["status"],
+        "rpc_connected": HEALTH_DATA["rpc_connected"],
+        "last_block_analyzed": HEALTH_DATA["last_block_analyzed"],
+        "last_check_timestamp": HEALTH_DATA["last_check_timestamp"],
+        "last_check_time_utc": time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(HEALTH_DATA["last_check_timestamp"])) if HEALTH_DATA["last_check_timestamp"] else None,
+        "errors_since_success": HEALTH_DATA["errors_since_success"],
+        "last_decision": HEALTH_DATA["last_decision"],
+        "simulation_mode": HEALTH_DATA["simulation_mode"],
+        "vault_address": HEALTH_DATA["vault_address"],
+        "hot_wallet_address": HEALTH_DATA["hot_wallet_address"],
+        "simulated_depeg_active": len(defi_vault_trader.MOCK_PRICES) > 0,
+        "simulated_depeg_price": list(defi_vault_trader.MOCK_PRICES.values())[0] if defi_vault_trader.MOCK_PRICES else None
+    })
+
+@app.route("/api/logs", methods=["GET"])
+def api_logs():
+    """
+    Renvoie les dernières lignes du log de production du bot.
+    """
+    limit = request.args.get("limit", default=150, type=int)
+    log_file_path = "logs/bot.log"
+    if not os.path.exists(log_file_path):
+        return jsonify([])
+    try:
+        with open(log_file_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+            last_lines = lines[-limit:]
+            return jsonify([line.strip() for line in last_lines])
+    except Exception as e:
+        return jsonify([f"Error reading logs: {e}"]), 500
+
+@app.route("/api/trigger-check", methods=["POST"])
+def api_trigger_check():
+    """
+    Déclenche immédiatement un cycle de vérification de peg.
+    """
+    trigger_event.set()
+    return jsonify({"status": "triggered"})
+
+@app.route("/api/simulate-depeg", methods=["POST"])
+def api_simulate_depeg():
+    """
+    Active ou désactive la simulation de depeg en injectant des prix mockés.
+    """
+    data = request.get_json() or {}
+    enabled = data.get("enabled", False)
+    price = data.get("price")
+    
+    if enabled:
+        if price is None:
+            return jsonify({"error": "Price is required when simulation is enabled"}), 400
+        try:
+            price_float = float(price)
+        except ValueError:
+            return jsonify({"error": "Price must be a valid number"}), 400
+            
+        defi_vault_trader.MOCK_PRICES["USDC"] = price_float
+        defi_vault_trader.MOCK_PRICES["USDT"] = price_float
+        defi_vault_trader.MOCK_PRICES["DAI"] = price_float
+        logging.info(f"[SIMULATION] Prix de simulation depeg activé à {price_float}$ pour USDC/USDT/DAI.")
+    else:
+        defi_vault_trader.MOCK_PRICES.clear()
+        logging.info("[SIMULATION] Simulation depeg désactivée. Utilisation des oracles réels.")
+        
+    return jsonify({
+        "simulated_depeg_active": len(defi_vault_trader.MOCK_PRICES) > 0,
+        "simulated_depeg_price": price
+    })
+
+@app.route("/api/vaults", methods=["GET"])
+def api_vaults():
+    """
+    Recherche, filtre et classe les vaults Beefy Finance via defi_vault_finder.
+    """
+    chains = request.args.getlist("chains")
+    min_apy = request.args.get("min_apy", default=0.0, type=float)
+    try:
+        vaults, apys = defi_vault_finder.fetch_beefy_data()
+        chains_filter = set(chains) if chains else None
+        # Convertir min_apy en décimal (ex: 5.0% -> 0.05)
+        min_apy_decimal = min_apy / 100.0 if min_apy else 0.0
+        filtered = defi_vault_finder.filter_and_rank_vaults(vaults, apys, chains=chains_filter, min_apy=min_apy_decimal)
+        return jsonify(filtered)
+    except Exception as e:
+        logging.error(f"Error serving vaults list: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/calculator", methods=["POST"])
+def api_calculator():
+    """
+    Exécute le calculateur de break-even.
+    """
+    data = request.get_json() or {}
+    try:
+        current_apy = float(data.get("current_apy", 0.0)) / 100.0
+        new_apy = float(data.get("new_apy", 0.0)) / 100.0
+        capital = float(data.get("capital", 10000.0))
+        days = int(data.get("amortization_days", 30))
+        zap_in = float(data.get("zap_in_fee", 0.05))
+        zap_out = float(data.get("zap_out_fee", 0.05))
+        withdraw = float(data.get("withdrawal_fee", 0.05))
+        slippage = float(data.get("slippage", 0.1))
+        
+        is_profitable, net_profit, break_even_apy, total_friction = defi_vault_finder.calculate_break_even(
+            current_apy, new_apy, capital, days, zap_in, zap_out, withdraw, slippage
+        )
+        
+        return jsonify({
+            "is_profitable": is_profitable,
+            "net_profit": net_profit,
+            "break_even_apy": break_even_apy * 100.0 if break_even_apy != float('inf') else None,
+            "total_friction": total_friction
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
 def run_health_server():
     """
-    Exécute le serveur de health check sur le port configuré.
+    Exécute le serveur de health check / dashboard sur le port configuré.
     """
     port = int(os.getenv("PORT", 8080))
-    logging.info(f"[HTTP] Lancement du serveur health check sur le port {port}...")
+    logging.info(f"[HTTP] Lancement du serveur health check / dashboard sur le port {port}...")
     try:
         app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
     except Exception as e:
-        logging.error(f"[HTTP] Impossible de démarrer le serveur health check : {e}")
+        logging.error(f"[HTTP] Impossible de démarrer le serveur : {e}")
 
 def setup_logging():
     """
@@ -172,6 +305,9 @@ def main():
     # 4. Boucle infinie d'exécution
     while True:
         try:
+            # Réinitialiser l'événement au début de l'itération
+            trigger_event.clear()
+            
             logging.info("Exécution de la vérification périodique...")
             w3 = rpc_manager.get_w3()
             
@@ -227,9 +363,9 @@ def main():
                     }
                 )
                 
-            # Pause avant la prochaine vérification standard
-            logging.info(f"Attente de {check_interval} secondes...")
-            time.sleep(check_interval)
+            # Pause avant la prochaine vérification standard ou réveil événementiel
+            logging.info(f"Attente de {check_interval} secondes (ou réveil immédiat)...")
+            trigger_event.wait(timeout=check_interval)
             
         except Exception as e:
             # Gestion d'erreurs (Panne totale RPC, etc.) -> Activation du Circuit Breaker
@@ -253,9 +389,9 @@ def main():
                 }
             )
             
-            # Pause de sécurité étendue (Circuit Breaker)
+            # Pause de sécurité étendue (Circuit Breaker) avec réveil événementiel possible
             logging.warning(f"[Circuit Breaker] Activation de la pause étendue de {circuit_breaker_sleep} secondes...")
-            time.sleep(circuit_breaker_sleep)
+            trigger_event.wait(timeout=circuit_breaker_sleep)
 
 if __name__ == "__main__":
     try:

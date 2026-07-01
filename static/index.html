@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeFi Bot Dashboard - Stablecoin Yield & Protection</title>
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <!-- CSS Style -->
+    <link rel="stylesheet" href="/static/style.css">
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+<body>
+    <div class="app-container">
+        <!-- HEADER -->
+        <header class="app-header">
+            <div class="header-logo">
+                <div class="logo-icon"><i data-lucide="shield-alert"></i></div>
+                <div class="logo-text">
+                    <h1>DeFi Bot <span>Stablecoin Guardian</span></h1>
+                    <p>Protection Anti-Depeg & Calculateur de Break-Even</p>
+                </div>
+            </div>
+            <div class="header-status">
+                <div id="bot-status-indicator" class="status-badge status-starting">
+                    <span class="status-dot animate-pulse"></span>
+                    <span id="bot-status-text">Initialisation...</span>
+                </div>
+                <div id="simulation-mode-indicator" class="status-badge mode-simulation">
+                    <i data-lucide="binary"></i>
+                    <span>Mode Simulation</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- MAIN DASHBOARD GRID -->
+        <main class="dashboard-grid">
+            
+            <!-- COLUMN 1: STATE & ACTIONS -->
+            <div class="grid-column">
+                <!-- WALLET & BLOCKCHAIN CONFIG -->
+                <section class="card config-card">
+                    <div class="card-header">
+                        <i data-lucide="cpu" class="card-icon text-accent"></i>
+                        <h2>État du Bot & Web3</h2>
+                    </div>
+                    <div class="card-body">
+                        <div class="state-item">
+                            <span class="label">RPC Network</span>
+                            <span id="rpc-status" class="value text-warning"><i data-lucide="wifi-off"></i> Déconnecté</span>
+                        </div>
+                        <div class="state-item">
+                            <span class="label">Dernier Bloc</span>
+                            <span id="last-block" class="value">N/A</span>
+                        </div>
+                        <div class="state-item">
+                            <span class="label">Dernier Peg Check</span>
+                            <span id="last-check" class="value">N/A</span>
+                        </div>
+                        <div class="state-item">
+                            <span class="label">Dernière Décision</span>
+                            <span id="last-decision" class="value highlight-box">N/A</span>
+                        </div>
+                        
+                        <div class="divider"></div>
+                        
+                        <div class="state-address-group">
+                            <div class="address-item">
+                                <div class="address-header">
+                                    <span class="label">Hot Wallet (Exécuteur)</span>
+                                    <button class="btn-copy" onclick="copyText('hot-wallet-addr')"><i data-lucide="copy"></i></button>
+                                </div>
+                                <div id="hot-wallet-addr" class="address-value">0x0000000000000000000000000000000000000000</div>
+                            </div>
+                            <div class="address-item">
+                                <div class="address-header">
+                                    <span class="label">Cold Wallet (Bénéficiaire)</span>
+                                    <button class="btn-copy" onclick="copyText('cold-wallet-addr')"><i data-lucide="copy"></i></button>
+                                </div>
+                                <div id="cold-wallet-addr" class="address-value">0x0000000000000000000000000000000000000000</div>
+                            </div>
+                            <div class="address-item">
+                                <div class="address-header">
+                                    <span class="label">Vault DeFi Actuel</span>
+                                    <button class="btn-copy" onclick="copyText('vault-addr')"><i data-lucide="copy"></i></button>
+                                </div>
+                                <div id="vault-addr" class="address-value">0x0000000000000000000000000000000000000000</div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- INTERACTIVE CONTROLS -->
+                <section class="card controls-card">
+                    <div class="card-header">
+                        <i data-lucide="sliders" class="card-icon text-accent"></i>
+                        <h2>Panneau de Contrôle</h2>
+                    </div>
+                    <div class="card-body">
+                        <!-- Direct Check -->
+                        <div class="control-row">
+                            <button id="btn-trigger-check" class="btn btn-primary btn-full">
+                                <i data-lucide="refresh-cw"></i> Vérifier le Peg Maintenant
+                            </button>
+                        </div>
+                        
+                        <div class="divider"></div>
+                        
+                        <!-- Depeg Simulator -->
+                        <div class="simulator-box">
+                            <h3><i data-lucide="flame"></i> Simulateur de Crise (Depeg)</h3>
+                            <p class="description">Forcez temporairement les prix oracles à baisser pour valider l'arbre de décision de protection.</p>
+                            
+                            <div class="form-group">
+                                <label for="sim-price-range">Prix Stablecoin Simulé : <span id="sim-price-val">0.96$</span></label>
+                                <input type="range" id="sim-price-range" min="0.80" max="1.00" step="0.01" value="0.96" class="range-slider">
+                            </div>
+                            
+                            <div class="simulator-buttons">
+                                <button id="btn-enable-simulation" class="btn btn-warning">
+                                    <i data-lucide="play"></i> Activer Simulation
+                                </button>
+                                <button id="btn-disable-simulation" class="btn btn-secondary" disabled>
+                                    <i data-lucide="square"></i> Désactiver
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+            </div>
+
+            <!-- COLUMN 2: LIVE TERMINAL & LOGS -->
+            <div class="grid-column large-column">
+                <section class="card terminal-card">
+                    <div class="card-header">
+                        <div class="header-left">
+                            <i data-lucide="terminal" class="card-icon text-success"></i>
+                            <h2>Console de Logs en Direct</h2>
+                        </div>
+                        <div class="header-right">
+                            <select id="log-filter" class="select-input">
+                                <option value="ALL">Tous les logs</option>
+                                <option value="INFO">INFO</option>
+                                <option value="WARNING">WARNING</option>
+                                <option value="ERROR">ERROR / CRITICAL</option>
+                            </select>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="autoscroll-toggle" checked>
+                                <span class="slider"></span>
+                                <span class="toggle-label">Auto-scroll</span>
+                            </label>
+                            <button id="btn-clear-terminal" class="btn btn-icon-text btn-secondary">
+                                <i data-lucide="trash-2"></i> Effacer
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body terminal-body">
+                        <div id="terminal-screen" class="terminal-content">
+                            <!-- Logs will be populated here -->
+                            <div class="log-line log-system">Connexion au serveur de logs en cours...</div>
+                        </div>
+                    </div>
+                </section>
+            </div>
+        </main>
+
+        <!-- LOWER SECTION: VAULT FINDER & MIGRATION CALCULATOR -->
+        <section class="bottom-section">
+            <div class="bottom-grid">
+                <!-- VAULT FINDER -->
+                <div class="card vault-finder-card">
+                    <div class="card-header">
+                        <i data-lucide="search" class="card-icon text-accent"></i>
+                        <h2>Recherche d'Opportunités (Beefy Finance)</h2>
+                    </div>
+                    <div class="card-body">
+                        <!-- Filters -->
+                        <div class="vault-filters">
+                            <div class="chain-checkboxes">
+                                <label class="checkbox-container">
+                                    <input type="checkbox" name="chains" value="arbitrum" checked>
+                                    <span class="checkmark"></span> Arbitrum
+                                </label>
+                                <label class="checkbox-container">
+                                    <input type="checkbox" name="chains" value="base" checked>
+                                    <span class="checkmark"></span> Base
+                                </label>
+                                <label class="checkbox-container">
+                                    <input type="checkbox" name="chains" value="optimism" checked>
+                                    <span class="checkmark"></span> Optimism
+                                </label>
+                                <label class="checkbox-container">
+                                    <input type="checkbox" name="chains" value="polygon" checked>
+                                    <span class="checkmark"></span> Polygon
+                                </label>
+                            </div>
+                            <div class="min-apy-group">
+                                <label for="min-apy-input">APY Min (%) :</label>
+                                <input type="number" id="min-apy-input" class="number-input" value="1.0" min="0" max="100" step="0.5">
+                            </div>
+                            <button id="btn-search-vaults" class="btn btn-secondary">
+                                <i data-lucide="search"></i> Rechercher
+                            </button>
+                        </div>
+
+                        <!-- Search list -->
+                        <div class="vaults-list-container">
+                            <div id="vaults-loader" class="loader-container hidden">
+                                <div class="spinner"></div>
+                                <p>Chargement des vaults Beefy Finance...</p>
+                            </div>
+                            <table id="vaults-table" class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>Chaîne</th>
+                                        <th>Vault / Nom</th>
+                                        <th>Plateforme</th>
+                                        <th>APY (%)</th>
+                                        <th>Sous-jacents</th>
+                                        <th>Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="vaults-tbody">
+                                    <tr>
+                                        <td colspan="6" class="text-center text-muted">Cliquez sur Rechercher pour lister les opportunités stablecoins L2</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- BREAK-EVEN CALCULATOR -->
+                <div class="card calculator-card">
+                    <div class="card-header">
+                        <i data-lucide="calculator" class="card-icon text-accent"></i>
+                        <h2>Calculateur d'Amortissement (Break-Even)</h2>
+                    </div>
+                    <div class="card-body">
+                        <form id="calc-form" class="calculator-form">
+                            <div class="form-row-2">
+                                <div class="form-group">
+                                    <label for="calc-capital">Capital à Déployer ($)</label>
+                                    <input type="number" id="calc-capital" class="number-input" value="10000" min="100" required>
+                                </div>
+                                <div class="form-group">
+                                    <label for="calc-days">Jours d'Amortissement</label>
+                                    <input type="number" id="calc-days" class="number-input" value="30" min="1" required>
+                                </div>
+                            </div>
+                            <div class="form-row-2">
+                                <div class="form-group">
+                                    <label for="calc-current-apy">APY Position Actuelle (%)</label>
+                                    <input type="number" id="calc-current-apy" class="number-input" value="5.0" step="0.01" min="0" required>
+                                </div>
+                                <div class="form-group">
+                                    <label for="calc-new-apy">APY Nouvelle Cible (%)</label>
+                                    <input type="number" id="calc-new-apy" class="number-input" value="12.5" step="0.01" min="0" required>
+                                </div>
+                            </div>
+                            <div class="form-row-3">
+                                <div class="form-group">
+                                    <label for="calc-zap-in">Zap-in Fee (%)</label>
+                                    <input type="number" id="calc-zap-in" class="number-input" value="0.05" step="0.01" min="0">
+                                </div>
+                                <div class="form-group">
+                                    <label for="calc-zap-out">Zap-out Fee (%)</label>
+                                    <input type="number" id="calc-zap-out" class="number-input" value="0.05" step="0.01" min="0">
+                                </div>
+                                <div class="form-group">
+                                    <label for="calc-withdraw">Retrait Fee (%)</label>
+                                    <input type="number" id="calc-withdraw" class="number-input" value="0.05" step="0.01" min="0">
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label for="calc-slippage">Slippage estimé conversion (%)</label>
+                                    <input type="number" id="calc-slippage" class="number-input" value="0.10" step="0.01" min="0">
+                            </div>
+                            
+                            <button type="submit" class="btn btn-primary btn-full">
+                                <i data-lucide="calculator"></i> Calculer la Rentabilité de Migration
+                            </button>
+                        </form>
+
+                        <div class="divider"></div>
+
+                        <!-- Result output -->
+                        <div id="calc-results-box" class="results-box hidden">
+                            <div id="calc-profit-status" class="profit-banner">
+                                <span class="profit-icon"><i data-lucide="check-circle-2"></i></span>
+                                <div class="profit-text">
+                                    <h4 id="calc-result-title">Migration rentable !</h4>
+                                    <p id="calc-result-subtitle">Gain de rendement net sur la période.</p>
+                                </div>
+                            </div>
+                            
+                            <div class="results-metrics">
+                                <div class="metric-card">
+                                    <span class="label">Bénéfice Net Réel</span>
+                                    <span id="res-net-profit" class="value text-success">+0.00 $</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">APY Min Requis (Break-Even)</span>
+                                    <span id="res-be-apy" class="value">N/A</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">Friction Totale</span>
+                                    <span id="res-friction" class="value text-warning">0.00%</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <!-- Notification system -->
+    <div id="toast" class="toast hidden">
+        <i id="toast-icon" data-lucide="info"></i>
+        <span id="toast-message">Message</span>
+    </div>
+
+    <!-- Scripts -->
+    <script src="/static/app.js"></script>
+    <script>
+        // Init Lucide Icons
+        lucide.createIcons();
+    </script>
+</body>
+</html>
